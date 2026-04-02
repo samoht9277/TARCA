@@ -31,21 +31,21 @@ function getAfipEnv(env: Env): "testing" | "production" {
   return env.AFIP_ENV === "production" ? "production" : "testing";
 }
 
-function formatCurrency(amount: number): string {
+export function formatCurrency(amount: number): string {
   return new Intl.NumberFormat("es-AR", {
     style: "currency",
     currency: "ARS",
   }).format(amount);
 }
 
-function formatCbteNro(ptoVta: number, cbteNro: number): string {
+export function formatCbteNro(ptoVta: number, cbteNro: number): string {
   return `${String(ptoVta).padStart(5, "0")}-${String(cbteNro).padStart(8, "0")}`;
 }
 
 /**
  * Parse user input: "<amount>" or "<amount> <dd/mm>" or "<amount> <dd/mm/yyyy>"
  */
-function parseInput(text: string): { amount: number; date: Date } | null {
+export function parseInput(text: string): { amount: number; date: Date } | null {
   const cleaned = text.replace(/\$/g, "").trim();
   // Match: number (with optional comma/dot decimals), then optional date
   const match = cleaned.match(
@@ -70,21 +70,21 @@ function parseInput(text: string): { amount: number; date: Date } | null {
   return { amount: Math.round(amount * 100) / 100, date };
 }
 
-function formatDateYMD(date: Date): string {
+export function formatDateYMD(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}${m}${d}`;
 }
 
-function parseDateYMD(str: string): Date {
+export function parseDateYMD(str: string): Date {
   const y = parseInt(str.substring(0, 4), 10);
   const m = parseInt(str.substring(4, 6), 10) - 1;
   const d = parseInt(str.substring(6, 8), 10);
   return new Date(y, m, d);
 }
 
-function formatDateAR(date: Date): string {
+export function formatDateAR(date: Date): string {
   return date.toLocaleDateString("es-AR", {
     day: "2-digit",
     month: "2-digit",

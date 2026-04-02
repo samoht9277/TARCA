@@ -9,6 +9,9 @@ install: ## Install dependencies
 dev: ## Run local dev server
 	npx wrangler dev
 
+test: ## Run tests
+	npx vitest run
+
 deploy: ## Deploy to Cloudflare Workers
 	npx wrangler deploy
 
