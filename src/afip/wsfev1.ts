@@ -113,10 +113,11 @@ export async function createInvoice(
   cuit: string,
   ptoVta: number,
   amount: number,
-  env: "testing" | "production" = "testing"
+  env: "testing" | "production" = "testing",
+  date: Date = new Date()
 ): Promise<InvoiceResult> {
   const cbteTipo = 11; // Factura C
-  const today = formatDate(new Date());
+  const today = formatDate(date);
 
   // Get next invoice number
   const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, cbteTipo, env);
