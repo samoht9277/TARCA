@@ -241,12 +241,12 @@ async function handleMessage(
       await sendMessage(
         token,
         chatId,
-        `<b>Factura C  ${formatCbteNro(ptoVta, targetNro)}</b>\n` +
+        `<b>Factura C ${formatCbteNro(ptoVta, targetNro)}</b>\n` +
           `${estado === "Aprobada" ? "Aprobada por ARCA" : "RECHAZADA"}\n\n` +
-          `Importe  <b>${importe}</b>\n` +
-          `Fecha  ${fchEmision}\n\n` +
-          `CAE  <code>${info.cae}</code>\n` +
-          `Vencimiento  ${fchVto}`
+          `Importe <code>${importe}</code>\n` +
+          `Fecha <code>${fchEmision}</code>\n\n` +
+          `CAE <code>${info.cae}</code>\n` +
+          `Vencimiento <code>${fchVto}</code>`
       );
     } catch (error) {
       console.error("Check failed:", error);
@@ -292,9 +292,9 @@ async function handleMessage(
       await sendMessage(
         token,
         chatId,
-        `<b>Anular Factura C  ${formatCbteNro(ptoVta, cbteNro)}</b>\n\n` +
-          `Monto  <b>${importe}</b>\n` +
-          `Fecha  ${fchEmision}\n\n` +
+        `<b>Anular Factura C ${formatCbteNro(ptoVta, cbteNro)}</b>\n\n` +
+          `Monto <code>${importe}</code>\n` +
+          `Fecha <code>${fchEmision}</code>\n\n` +
           `Se emitira una <b>Nota de Credito C</b> por el mismo monto.`,
         keyboard
       );
@@ -370,7 +370,7 @@ async function handleMessage(
       const neto = sumFacturas - sumNC;
 
       // Build summary message
-      let msg = `<b>Resumen  ${monthName}</b>\n\n`;
+      let msg = `<b>Resumen ${monthName}</b>\n\n`;
 
       if (invoices.length === 0 && totalNC === 0) {
         msg += "No hay comprobantes emitidos este mes.";
@@ -378,19 +378,19 @@ async function handleMessage(
         if (invoices.length > 0) {
           msg += `<b>Facturas</b>\n`;
           for (const inv of invoices.reverse()) {
-            msg += `  #${inv.nro}  ${formatCurrency(inv.amount)}  ${inv.date}\n`;
+            msg += `  #${inv.nro}  <code>${formatCurrency(inv.amount)}</code>  ${inv.date}\n`;
           }
           msg += `\n`;
         }
 
         if (totalNC > 0) {
-          msg += `Notas de credito: ${totalNC} por ${formatCurrency(sumNC)}\n\n`;
+          msg += `Notas de credito: ${totalNC} por <code>${formatCurrency(sumNC)}</code>\n\n`;
         }
 
-        msg += `Facturado  <b>${formatCurrency(sumFacturas)}</b>`;
+        msg += `Facturado <code>${formatCurrency(sumFacturas)}</code>`;
         if (totalNC > 0) {
-          msg += `\nAnulado  ${formatCurrency(sumNC)}`;
-          msg += `\n<b>Neto  ${formatCurrency(neto)}</b>`;
+          msg += `\nAnulado <code>${formatCurrency(sumNC)}</code>`;
+          msg += `\n<b>Neto <code>${formatCurrency(neto)}</code></b>`;
         }
         msg += `\n${totalFacturas} factura${totalFacturas !== 1 ? "s" : ""}`;
       }
@@ -439,10 +439,10 @@ async function handleMessage(
     token,
     chatId,
     `<b>Nueva Factura C</b>${envLabel}\n\n` +
-      `Monto  <b>${formatCurrency(amount)}</b>\n` +
-      `Fecha  ${dateStr}${isToday ? " (hoy)" : ""}\n` +
-      `Concepto  Servicios Informaticos\n` +
-      `Receptor  Consumidor Final`,
+      `Monto <code>${formatCurrency(amount)}</code>\n` +
+      `Fecha <code>${dateStr}${isToday ? " (hoy)" : ""}</code>\n` +
+      `Concepto Servicios Informaticos\n` +
+      `Receptor Consumidor Final`,
     confirmKeyboard
   );
 }
@@ -510,12 +510,12 @@ async function handleCallbackQuery(
         token,
         chatId,
         messageId,
-        `<b>Nota de Credito C  ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+        `<b>Nota de Credito C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
           `Aprobada por ARCA\n\n` +
           `Anula Factura C #${cbteNro}\n` +
-          `Monto  <b>${importe}</b>\n\n` +
-          `CAE  <code>${result.cae}</code>\n` +
-          `Vencimiento  ${fchVto}`
+          `Monto <code>${importe}</code>\n\n` +
+          `CAE <code>${result.cae}</code>\n` +
+          `Vencimiento <code>${fchVto}</code>`
       );
     } catch (error) {
       console.error("Credit note failed:", error);
@@ -575,13 +575,13 @@ async function handleCallbackQuery(
         token,
         chatId,
         messageId,
-        `<b>Factura C  ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+        `<b>Factura C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
           `Aprobada por ARCA\n\n` +
-          `Monto  <b>${formatCurrency(amount)}</b>\n` +
-          `Fecha  ${formatDateAR(date)}\n` +
-          `Concepto  Servicios Informaticos\n\n` +
-          `CAE  <code>${result.cae}</code>\n` +
-          `Vencimiento  ${fchVto}` +
+          `Monto <code>${formatCurrency(amount)}</code>\n` +
+          `Fecha <code>${formatDateAR(date)}</code>\n` +
+          `Concepto Servicios Informaticos\n\n` +
+          `CAE <code>${result.cae}</code>\n` +
+          `Vencimiento <code>${fchVto}</code>` +
           envLabel
       );
     } catch (error) {
