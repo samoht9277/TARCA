@@ -422,7 +422,7 @@ async function handleMessage(
       if (invoices.length === 0 && totalNC === 0) {
         msg += "No hay comprobantes emitidos este mes.";
       } else {
-        msg += `<pre>`;
+        msg += `<pre>Facturas\n`;
         for (const inv of invoices.reverse()) {
           const amt = formatCurrency(inv.amount).padStart(12);
           msg += `#${String(inv.nro).padStart(3)}  ${amt}  ${inv.date}\n`;
