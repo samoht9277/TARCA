@@ -277,7 +277,7 @@ async function handleMessage(
         token,
         chatId,
         `<b>Factura C ${formatCbteNro(ptoVta, targetNro)}</b>\n` +
-          `${estado === "Aprobada" ? "Aprobada por ARCA" : "RECHAZADA"}\n` +
+          `${estado === "Aprobada" ? "✅ Aprobada por ARCA" : "RECHAZADA"}\n` +
           `<pre>` +
           `Importe  ${importe}\n` +
           `Fecha    ${fchEmision}\n` +
@@ -865,7 +865,7 @@ async function handleCallbackQuery(
         chatId,
         messageId,
         `<b>Factura C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
-          `Aprobada por ARCA\n` +
+          `✅ Aprobada por ARCA\n` +
           `<pre>` +
           `Monto    ${formatCurrency(amount)}\n` +
           `Fecha    ${formatDateAR(date)}\n` +
@@ -921,7 +921,7 @@ async function handleCallbackQuery(
         chatId,
         messageId,
         `<b>Nota de Credito C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
-          `Aprobada por ARCA\n` +
+          `✅ Aprobada por ARCA\n` +
           `<pre>` +
           `Anula    Factura C #${cbteNro}\n` +
           `Monto    ${importe}\n` +
@@ -995,7 +995,7 @@ async function handleCallbackQuery(
         chatId,
         messageId,
         `<b>Factura C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
-          `Aprobada por ARCA\n` +
+          `✅ Aprobada por ARCA\n` +
           `<pre>` +
           `Monto    ${formatCurrency(amount)}\n` +
           `Fecha    ${formatDateAR(date)}\n` +
