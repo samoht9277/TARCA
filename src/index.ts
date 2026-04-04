@@ -56,6 +56,7 @@ interface PendingVenta {
   date: Date;
   messageId: number;
   timestamp: number;
+  concepto?: Concepto;
 }
 const pendingVentas = new Map<number, PendingVenta>();
 
@@ -436,7 +437,7 @@ async function handleMessage(
     return;
   }
 
-  // Check if we're waiting for a product description
+  // Check if we're waiting for a custom name (product or service)
   const pending = pendingVentas.get(chatId);
   if (pending && !text.startsWith("/")) {
     pendingVentas.delete(chatId);
@@ -450,11 +451,18 @@ async function handleMessage(
     const description = text.substring(0, 30);
     const datePayload = formatDateYMD(pending.date);
     const descShort = description.substring(0, 20);
+    const isService = pending.concepto === 2;
+    const tipoLabel = isService ? "Servicio" : "Producto";
+
+    // Service with custom name uses confirm: callback, product uses venta:
+    const callbackData = isService
+      ? `confirm:${pending.amount}:${datePayload}`
+      : `venta:${pending.amount}:${datePayload}:${descShort}`;
 
     const confirmKeyboard = {
       inline_keyboard: [
         [
-          { text: "Confirmar", callback_data: `venta:${pending.amount}:${datePayload}:${descShort}` },
+          { text: "Confirmar", callback_data: callbackData },
           { text: "Cancelar", callback_data: "cancel" },
         ],
       ],
@@ -466,10 +474,10 @@ async function handleMessage(
     await sendMessage(
       token,
       chatId,
-      `<b>Nueva Factura C - Producto</b>${envLabel}\n` +
+      `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
         `<pre>` +
         `Monto    ${formatCurrency(pending.amount)}\n` +
-        `Fecha    ${formatDateAR(pending.date)} (hoy)\n` +
+        `Fecha    ${formatDateAR(pending.date)}\n` +
         `Concepto ${description}\n` +
         `Receptor Consumidor Final` +
         `</pre>`,
@@ -572,11 +580,14 @@ async function handleCallbackQuery(
     const dateFormatted = formatDateAR(date);
 
     if (tipo === "s") {
-      // Service: show confirmation with "Servicios Informaticos"
-      const confirmKeyboard = {
+      // Service: show default name, offer to change
+      const serviceKeyboard = {
         inline_keyboard: [
           [
             { text: "Confirmar", callback_data: `confirm:${amount}:${dateStr}` },
+            { text: "Cambiar nombre", callback_data: `tipo:sn:${amount}:${dateStr}` },
+          ],
+          [
             { text: "Cancelar", callback_data: "cancel" },
           ],
         ],
@@ -593,8 +604,29 @@ async function handleCallbackQuery(
           `Concepto Servicios Informaticos\n` +
           `Receptor Consumidor Final` +
           `</pre>` +
-          `Confirmar?`,
-        confirmKeyboard
+          `Confirmar o cambiar nombre del concepto?`,
+        serviceKeyboard
+      );
+    } else if (tipo === "sn") {
+      // Service with custom name: ask for it
+      pendingVentas.set(chatId, {
+        amount,
+        date,
+        messageId,
+        timestamp: Date.now(),
+        concepto: 2,
+      });
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nueva Factura C - Servicio</b>\n` +
+          `<pre>` +
+          `Monto ${formatCurrency(amount)}\n` +
+          `Fecha ${dateFormatted}` +
+          `</pre>` +
+          `Enviame el nombre del servicio:`
       );
     } else {
       // Product: ask for description
@@ -603,6 +635,7 @@ async function handleCallbackQuery(
         date,
         messageId,
         timestamp: Date.now(),
+        concepto: 1,
       });
 
       await editMessageText(
