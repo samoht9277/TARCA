@@ -33,6 +33,15 @@ export interface Env {
 const MAX_AMOUNT = 10_000_000;
 const AR_TZ_OFFSET = -3 * 60 * 60 * 1000;
 
+// In-memory state for pending product invoices awaiting a description
+interface PendingVenta {
+  amount: number;
+  date: Date;
+  messageId: number;
+  timestamp: number;
+}
+const pendingVentas = new Map<number, PendingVenta>();
+
 function getAfipEnv(env: Env): "testing" | "production" {
   return env.AFIP_ENV === "production" ? "production" : "testing";
 }
@@ -193,16 +202,17 @@ async function handleMessage(
       chatId,
       `<b>TARCA</b>${envTag}\n` +
         `Facturacion electronica por Telegram\n\n` +
-        `Enviame un monto para crear una Factura C:\n\n` +
-        `  <code>15000</code>  -  fecha de hoy\n` +
-        `  <code>15000 28/03</code>  -  con fecha\n` +
-        `  <code>1.500,50</code>  -  con decimales\n\n` +
+        `Enviame un monto y te pregunto el resto:\n` +
+        `<pre>` +
+        `15000\n` +
+        `15000 28/03\n` +
+        `1.500,50` +
+        `</pre>` +
         `<b>Comandos</b>\n` +
-        `  /venta 5000 Teclado  -  factura producto\n` +
-        `  /check  -  ultima factura emitida\n` +
-        `  /check 3  -  consultar factura #3\n` +
-        `  /anular 3  -  anular factura #3\n` +
-        `  /resumen  -  resumen del mes`
+        `  /check - ultima factura\n` +
+        `  /check 3 - consultar factura #3\n` +
+        `  /anular 3 - anular factura #3\n` +
+        `  /resumen - resumen del mes`
     );
     return;
   }
@@ -409,36 +419,25 @@ async function handleMessage(
     return;
   }
 
-  // Handle /venta command - product invoice with description
-  if (text.startsWith("/venta")) {
-    const rest = text.replace(/^\/venta\s*/, "");
-    const ventaMatch = rest.match(/^([\d.,]+)\s+(.+)$/);
+  // Check if we're waiting for a product description
+  const pending = pendingVentas.get(chatId);
+  if (pending && !text.startsWith("/")) {
+    pendingVentas.delete(chatId);
 
-    if (!ventaMatch) {
-      await sendMessage(
-        token,
-        chatId,
-        "Uso: <code>/venta 5000 Teclado mecanico</code>"
-      );
+    // Expire after 5 minutes
+    if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+      await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
       return;
     }
 
-    const amount = parseAmountStr(ventaMatch[1]);
-    const description = ventaMatch[2].trim();
-
-    if (amount === null) {
-      await sendMessage(token, chatId, "Monto invalido.");
-      return;
-    }
-
-    const date = nowAR();
-    const datePayload = formatDateYMD(date);
-    // callback_data: "venta:<amount>:<YYYYMMDD>:<description>" (truncate desc to fit 64 bytes)
+    const description = text.substring(0, 30);
+    const datePayload = formatDateYMD(pending.date);
     const descShort = description.substring(0, 20);
+
     const confirmKeyboard = {
       inline_keyboard: [
         [
-          { text: "Confirmar", callback_data: `venta:${amount}:${datePayload}:${descShort}` },
+          { text: "Confirmar", callback_data: `venta:${pending.amount}:${datePayload}:${descShort}` },
           { text: "Cancelar", callback_data: "cancel" },
         ],
       ],
@@ -452,8 +451,8 @@ async function handleMessage(
       chatId,
       `<b>Nueva Factura C - Producto</b>${envLabel}\n` +
         `<pre>` +
-        `Monto    ${formatCurrency(amount)}\n` +
-        `Fecha    ${formatDateAR(date)} (hoy)\n` +
+        `Monto    ${formatCurrency(pending.amount)}\n` +
+        `Fecha    ${formatDateAR(pending.date)} (hoy)\n` +
         `Concepto ${description}\n` +
         `Receptor Consumidor Final` +
         `</pre>`,
@@ -471,12 +470,11 @@ async function handleMessage(
       chatId,
       `No entendi. Enviame un monto para facturar:\n` +
         `<pre>` +
-        `15000           factura servicios\n` +
-        `15000 28/03     con fecha\n` +
-        `1.500,50        con decimales\n` +
+        `15000\n` +
+        `15000 28/03\n` +
+        `1.500,50` +
         `</pre>` +
         `<b>Comandos</b>\n` +
-        `  /venta 5000 Teclado - factura producto\n` +
         `  /check - ultima factura\n` +
         `  /anular 3 - anular factura #3\n` +
         `  /resumen - resumen del mes`
@@ -486,34 +484,34 @@ async function handleMessage(
 
   const { amount, date } = parsed;
   const dateStr = formatDateAR(date);
-
-  // callback_data format: "confirm:<amount>:<YYYYMMDD>"
   const datePayload = formatDateYMD(date);
-  const confirmKeyboard = {
+  const todayAR = nowAR();
+  const isToday = formatDateYMD(date) === formatDateYMD(todayAR);
+
+  const afipEnv = getAfipEnv(env);
+  const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+
+  // Step 1: Ask servicio or venta
+  const typeKeyboard = {
     inline_keyboard: [
       [
-        { text: "Confirmar", callback_data: `confirm:${amount}:${datePayload}` },
+        { text: "Servicio", callback_data: `tipo:s:${amount}:${datePayload}` },
+        { text: "Venta", callback_data: `tipo:v:${amount}:${datePayload}` },
         { text: "Cancelar", callback_data: "cancel" },
       ],
     ],
   };
-
-  const afipEnv = getAfipEnv(env);
-  const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
-  const todayAR = nowAR();
-  const isToday = formatDateYMD(date) === formatDateYMD(todayAR);
 
   await sendMessage(
     token,
     chatId,
     `<b>Nueva Factura C</b>${envLabel}\n` +
       `<pre>` +
-      `Monto    ${formatCurrency(amount)}\n` +
-      `Fecha    ${dateStr}${isToday ? " (hoy)" : ""}\n` +
-      `Concepto Servicios Informaticos\n` +
-      `Receptor Consumidor Final` +
-      `</pre>`,
-    confirmKeyboard
+      `Monto ${formatCurrency(amount)}\n` +
+      `Fecha ${dateStr}${isToday ? " (hoy)" : ""}` +
+      `</pre>` +
+      `Servicio o venta?`,
+    typeKeyboard
   );
 }
 
@@ -539,6 +537,69 @@ async function handleCallbackQuery(
 
   if (query.data === "cancel") {
     await editMessageText(token, chatId, messageId, "Cancelado.");
+    return;
+  }
+
+  if (query.data.startsWith("tipo:")) {
+    const parts = query.data.split(":");
+    const tipo = parts[1]; // "s" or "v"
+    const amount = parseFloat(parts[2]);
+    const dateStr = parts[3];
+
+    if (isNaN(amount) || !dateStr) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+    const dateFormatted = formatDateAR(date);
+
+    if (tipo === "s") {
+      // Service: show confirmation with "Servicios Informaticos"
+      const confirmKeyboard = {
+        inline_keyboard: [
+          [
+            { text: "Confirmar", callback_data: `confirm:${amount}:${dateStr}` },
+            { text: "Cancelar", callback_data: "cancel" },
+          ],
+        ],
+      };
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nueva Factura C - Servicio</b>\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(amount)}\n` +
+          `Fecha    ${dateFormatted}\n` +
+          `Concepto Servicios Informaticos\n` +
+          `Receptor Consumidor Final` +
+          `</pre>` +
+          `Confirmar?`,
+        confirmKeyboard
+      );
+    } else {
+      // Product: ask for description
+      pendingVentas.set(chatId, {
+        amount,
+        date,
+        messageId,
+        timestamp: Date.now(),
+      });
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nueva Factura C - Producto</b>\n` +
+          `<pre>` +
+          `Monto ${formatCurrency(amount)}\n` +
+          `Fecha ${dateFormatted}` +
+          `</pre>` +
+          `Enviame el nombre del producto:`
+      );
+    }
     return;
   }
 
