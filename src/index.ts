@@ -439,62 +439,74 @@ async function handleMessage(
     return;
   }
 
-  // Check if we're waiting for user input (description or receptor)
-  const pending = pendingInputs.get(chatId);
-  if (pending && !text.startsWith("/")) {
-    // Expire after 5 minutes
+  // Handle /id command - identify receptor for pending invoice
+  if (text.startsWith("/id")) {
+    const pending = pendingInputs.get(chatId);
+    if (!pending || pending.waitingFor !== "receptor") {
+      await sendMessage(token, chatId, "No hay factura pendiente. Enviame un monto primero.");
+      return;
+    }
+
     if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
       pendingInputs.delete(chatId);
       await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
       return;
     }
 
-    if (pending.waitingFor === "receptor") {
-      pendingInputs.delete(chatId);
-      // Parse CUIT (11 digits) or DNI (7-8 digits)
-      const cleaned = text.replace(/[-.\s]/g, "");
-      if (!/^\d{7,11}$/.test(cleaned)) {
-        await sendMessage(token, chatId, "Ingresa un CUIT (11 digitos) o DNI (7-8 digitos).");
-        return;
-      }
+    const numStr = text.replace(/^\/id\s*/, "").replace(/[-.\s]/g, "");
+    if (!/^\d{7,11}$/.test(numStr)) {
+      await sendMessage(token, chatId, "Ingresa un CUIT (11 digitos) o DNI (7-8 digitos).\nEj: <code>/id 20345678901</code>");
+      return;
+    }
 
-      const docTipo = cleaned.length >= 11 ? 80 : 96; // 80=CUIT, 96=DNI
-      const docTipoLabel = docTipo === 80 ? "CUIT" : "DNI";
-      const datePayload = formatDateYMD(pending.date);
-      const descShort = (pending.description || "Servicios Informaticos").substring(0, 15);
-      const isProduct = pending.concepto === 1;
+    pendingInputs.delete(chatId);
+    const docTipo = numStr.length >= 11 ? 80 : 96;
+    const docTipoLabel = docTipo === 80 ? "CUIT" : "DNI";
+    const datePayload = formatDateYMD(pending.date);
+    const descShort = (pending.description || "Servicios Informaticos").substring(0, 15);
+    const isProduct = pending.concepto === 1;
 
-      const callbackData = isProduct
-        ? `venta:${pending.amount}:${datePayload}:${descShort}:${docTipo}:${cleaned}`
-        : `confirm:${pending.amount}:${datePayload}:${docTipo}:${cleaned}`;
+    const callbackData = isProduct
+      ? `venta:${pending.amount}:${datePayload}:${descShort}:${docTipo}:${numStr}`
+      : `confirm:${pending.amount}:${datePayload}:${docTipo}:${numStr}`;
 
-      const tipoLabel = isProduct ? "Producto" : "Servicio";
-      const conceptoLabel = pending.description || "Servicios Informaticos";
+    const tipoLabel = isProduct ? "Producto" : "Servicio";
+    const conceptoLabel = pending.description || "Servicios Informaticos";
 
-      const confirmKeyboard = {
-        inline_keyboard: [
-          [
-            { text: "Confirmar", callback_data: callbackData },
-            { text: "Cancelar", callback_data: "cancel" },
-          ],
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "Confirmar", callback_data: callbackData },
+          { text: "Cancelar", callback_data: "cancel" },
         ],
-      };
+      ],
+    };
 
-      const afipEnv = getAfipEnv(env);
-      const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+    const afipEnv = getAfipEnv(env);
+    const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
 
-      await sendMessage(
-        token,
-        chatId,
-        `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
-          `<pre>` +
-          `Monto    ${formatCurrency(pending.amount)}\n` +
-          `Fecha    ${formatDateAR(pending.date)}\n` +
-          `Concepto ${conceptoLabel}\n` +
-          `Receptor ${docTipoLabel} ${cleaned}` +
-          `</pre>`,
-        confirmKeyboard
-      );
+    await sendMessage(
+      token,
+      chatId,
+      `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
+        `<pre>` +
+        `Monto    ${formatCurrency(pending.amount)}\n` +
+        `Fecha    ${formatDateAR(pending.date)}\n` +
+        `Concepto ${conceptoLabel}\n` +
+        `Receptor ${docTipoLabel} ${numStr}` +
+        `</pre>`,
+      confirmKeyboard
+    );
+    return;
+  }
+
+  // Check if we're waiting for user input (description)
+  const pending = pendingInputs.get(chatId);
+  if (pending && pending.waitingFor !== "receptor" && !text.startsWith("/")) {
+    // Expire after 5 minutes
+    if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+      pendingInputs.delete(chatId);
+      await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
       return;
     }
 
@@ -721,25 +733,33 @@ async function handleCallbackQuery(
       return;
     }
 
-    const date = parseDateYMD(dateStr);
-
-    pendingInputs.set(chatId, {
-      amount,
-      date,
-      messageId,
-      timestamp: Date.now(),
-      concepto,
-      description: description || undefined,
-      waitingFor: "receptor",
-    });
+    // Encode state in callback_data for CUIT/DNI buttons instead of using memory
+    const ctx = `${amount}:${dateStr}:${concepto}:${description}`;
 
     await editMessageText(
       token,
       chatId,
       messageId,
       `<b>Identificar receptor</b>\n\n` +
-        `Enviame el CUIT (11 digitos) o DNI (7-8 digitos):`
+        `Enviame el CUIT o DNI:\n` +
+        `<code>/id 20345678901</code>`,
+      {
+        inline_keyboard: [
+          [{ text: "Sin identificar (Consumidor Final)", callback_data: concepto === 1 ? `venta:${amount}:${dateStr}:${description}` : `confirm:${amount}:${dateStr}` }],
+          [{ text: "Cancelar", callback_data: "cancel" }],
+        ],
+      }
     );
+    // Store context for /id command
+    pendingInputs.set(chatId, {
+      amount,
+      date: parseDateYMD(dateStr),
+      messageId,
+      timestamp: Date.now(),
+      concepto: concepto as Concepto,
+      description: description || undefined,
+      waitingFor: "receptor",
+    });
     return;
   }
 
