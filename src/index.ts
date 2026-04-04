@@ -232,7 +232,9 @@ async function handleMessage(
         `  /check - ultima factura\n` +
         `  /check 3 - consultar factura #3\n` +
         `  /anular 3 - anular factura #3\n` +
-        `  /resumen - resumen del mes`
+        `  /resumen - resumen del mes\n` +
+        `  /resumen 03/2026 - resumen de marzo\n` +
+        `  /status - estado del bot`
     );
     return;
   }
@@ -288,6 +290,34 @@ async function handleMessage(
     } catch (error) {
       console.error("Check failed:", error);
       await sendMessage(token, chatId, "Error al consultar factura.");
+    }
+    return;
+  }
+
+  // Handle /status command
+  if (text.startsWith("/status")) {
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+      const lastFactura = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+      const lastNC = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 13, afipEnv);
+
+      await sendMessage(
+        token,
+        chatId,
+        `<b>Status</b>\n` +
+          `<pre>` +
+          `Entorno     ${afipEnv}\n` +
+          `CUIT        ${env.AFIP_CUIT}\n` +
+          `Pto Venta   ${ptoVta}\n` +
+          `Facturas    ${lastFactura}\n` +
+          `Notas cred. ${lastNC}` +
+          `</pre>`
+      );
+    } catch (error) {
+      console.error("Status failed:", error);
+      await sendMessage(token, chatId, "Error al consultar estado.");
     }
     return;
   }
@@ -351,7 +381,7 @@ async function handleMessage(
     return;
   }
 
-  // Handle /resumen command - monthly summary
+  // Handle /resumen command - monthly summary, optional month param
   if (text.startsWith("/resumen")) {
     try {
       const afipEnv = getAfipEnv(env);
@@ -359,10 +389,24 @@ async function handleMessage(
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
       const today = nowAR();
-      const currentMonth = today.getMonth();
-      const currentYear = today.getFullYear();
-      const monthLabel = today.toLocaleDateString("es-AR", { month: "long" }).toUpperCase();
-      const yearLabel = today.getFullYear();
+      let targetMonth = today.getMonth();
+      let targetYear = today.getFullYear();
+
+      // Parse optional mm/yyyy or mm/yy param
+      const paramMatch = text.match(/\/resumen\s+(\d{1,2})\/(\d{2,4})/);
+      if (paramMatch) {
+        targetMonth = parseInt(paramMatch[1], 10) - 1;
+        targetYear = parseInt(paramMatch[2], 10);
+        if (targetYear < 100) targetYear += 2000;
+        if (targetMonth < 0 || targetMonth > 11) {
+          await sendMessage(token, chatId, "Mes invalido. Uso: <code>/resumen 03/2026</code>");
+          return;
+        }
+      }
+
+      const targetDate = new Date(targetYear, targetMonth, 1);
+      const monthLabel = targetDate.toLocaleDateString("es-AR", { month: "long" }).toUpperCase();
+      const yearLabel = targetYear;
 
       // Get last invoice number for Factura C
       const lastFactura = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
@@ -382,9 +426,13 @@ async function handleMessage(
         if (!info.cbteFch) continue;
 
         const invDate = parseDateYMD(info.cbteFch);
-        if (invDate.getFullYear() !== currentYear || invDate.getMonth() !== currentMonth) {
-          break; // Past invoices are in order, so we can stop
-        }
+        const invY = invDate.getFullYear();
+        const invM = invDate.getMonth();
+
+        // Skip invoices from later months
+        if (invY > targetYear || (invY === targetYear && invM > targetMonth)) continue;
+        // Stop at invoices before target month
+        if (invY < targetYear || (invY === targetYear && invM < targetMonth)) break;
 
         if (info.resultado === "A") {
           const amount = parseFloat(info.impTotal);
@@ -404,9 +452,11 @@ async function handleMessage(
         if (!info.cbteFch) continue;
 
         const invDate = parseDateYMD(info.cbteFch);
-        if (invDate.getFullYear() !== currentYear || invDate.getMonth() !== currentMonth) {
-          break;
-        }
+        const invY = invDate.getFullYear();
+        const invM = invDate.getMonth();
+
+        if (invY > targetYear || (invY === targetYear && invM > targetMonth)) continue;
+        if (invY < targetYear || (invY === targetYear && invM < targetMonth)) break;
 
         if (info.resultado === "A") {
           totalNC++;
@@ -420,7 +470,7 @@ async function handleMessage(
       let msg = `<b>Resumen | ${monthLabel} ${yearLabel}</b>\n\n`;
 
       if (invoices.length === 0 && totalNC === 0) {
-        msg += "No hay comprobantes emitidos este mes.";
+        msg += "No hay comprobantes emitidos.";
       } else {
         msg += `<pre>Facturas\n`;
         for (const inv of invoices.reverse()) {
@@ -572,7 +622,9 @@ async function handleMessage(
         `<b>Comandos</b>\n` +
         `  /check - ultima factura\n` +
         `  /anular 3 - anular factura #3\n` +
-        `  /resumen - resumen del mes`
+        `  /resumen - resumen del mes\n` +
+        `  /resumen 03/2026 - otro mes\n` +
+        `  /status - estado del bot`
     );
     return;
   }

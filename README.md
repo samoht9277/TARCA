@@ -15,11 +15,13 @@ Send an amount to the bot, confirm, and get a Factura C issued instantly.
 **Invoice defaults:** Factura C, Consumidor Final, Monotributista
 
 **Commands:**
-- `/start` - show help
+- `/start` or `/help` - show help
 - `/check` - query the last invoice emitted
 - `/check 3` - query invoice #3
 - `/anular 3` - reverse invoice #3 with a Nota de Credito C
-- `/resumen` - monthly summary with totals
+- `/resumen` - current month summary with totals
+- `/resumen 03/2026` - summary for a specific month
+- `/status` - bot config and invoice counts
 
 ## Setup
 
