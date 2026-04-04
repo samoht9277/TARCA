@@ -7,16 +7,19 @@ Send an amount to the bot, confirm, and get a Factura C issued instantly.
 ## How it works
 
 1. You text the bot an amount (e.g. `15000` or `1.500,50`)
-2. Bot asks for confirmation with inline buttons
-3. You tap **Confirmar**, bot creates the invoice on ARCA
-4. Bot replies with the invoice number, CAE, and expiry
+2. Bot asks: Servicio or Venta?
+3. You pick the type, optionally change the concept name or identify the receiver (CUIT/DNI)
+4. You tap **CONFIRMAR**, bot creates the invoice on ARCA
+5. Bot replies with the invoice number, CAE, and expiry
 
-**Invoice defaults:** Factura C, Servicios Informaticos, Consumidor Final, Monotributista
+**Invoice defaults:** Factura C, Consumidor Final, Monotributista
 
 **Commands:**
 - `/start` - show help
 - `/check` - query the last invoice emitted
 - `/check 3` - query invoice #3
+- `/anular 3` - reverse invoice #3 with a Nota de Credito C
+- `/resumen` - monthly summary with totals
 
 ## Setup
 
@@ -141,6 +144,7 @@ make help       # show all available commands
 - The bot only responds to private chats (ignores groups)
 - WSAA auth tokens are cached in-memory to avoid rate limiting
 - Invoice number collision is retried automatically (concurrent request safety)
+- Friendly error messages for common AFIP rejections (backdating, unauthorized PtoVta, etc.)
 
 ## Project structure
 
