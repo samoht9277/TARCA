@@ -319,7 +319,8 @@ async function handleMessage(
       const today = nowAR();
       const currentMonth = today.getMonth();
       const currentYear = today.getFullYear();
-      const monthName = today.toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+      const monthLabel = today.toLocaleDateString("es-AR", { month: "long" }).toUpperCase();
+      const yearLabel = today.getFullYear();
 
       // Get last invoice number for Factura C
       const lastFactura = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
@@ -374,7 +375,7 @@ async function handleMessage(
       const neto = sumFacturas - sumNC;
 
       // Build summary message
-      let msg = `<b>Resumen ${monthName}</b>\n\n`;
+      let msg = `<b>Resumen | ${monthLabel} ${yearLabel}</b>\n\n`;
 
       if (invoices.length === 0 && totalNC === 0) {
         msg += "No hay comprobantes emitidos este mes.";
