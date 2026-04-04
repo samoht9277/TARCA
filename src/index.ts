@@ -469,8 +469,17 @@ async function handleMessage(
     await sendMessage(
       token,
       chatId,
-      "No entendi. Enviame un monto, opcionalmente con fecha.\n\n" +
-        "Ej: <code>15000</code> o <code>15000 28/03</code>"
+      `No entendi. Enviame un monto para facturar:\n` +
+        `<pre>` +
+        `15000           factura servicios\n` +
+        `15000 28/03     con fecha\n` +
+        `1.500,50        con decimales\n` +
+        `</pre>` +
+        `<b>Comandos</b>\n` +
+        `  /venta 5000 Teclado - factura producto\n` +
+        `  /check - ultima factura\n` +
+        `  /anular 3 - anular factura #3\n` +
+        `  /resumen - resumen del mes`
     );
     return;
   }
