@@ -16,7 +16,7 @@ import {
   setWebhook,
 } from "./telegram";
 import { authenticate } from "./afip/wsaa";
-import { createInvoice, queryInvoice, getLastInvoiceNumber } from "./afip/wsfev1";
+import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, type Concepto, type ReceiverDoc } from "./afip/wsfev1";
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
@@ -32,6 +32,35 @@ export interface Env {
 
 const MAX_AMOUNT = 10_000_000;
 const AR_TZ_OFFSET = -3 * 60 * 60 * 1000;
+
+function friendlyError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.includes("numero o fecha") || msg.includes("proximo a autorizar")) {
+    return "La fecha no puede ser anterior a la ultima factura emitida.";
+  }
+  if (msg.includes("PUNTO DE VENTA") || msg.includes("RECE")) {
+    return "El punto de venta no esta habilitado para factura electronica.";
+  }
+  if (msg.includes("NO AUTORIZADO")) {
+    return "No autorizado a emitir comprobantes. Verifica tu punto de venta.";
+  }
+  if (msg.includes("cert") || msg.includes("Certificado")) {
+    return "Error de certificado. Verifica AFIP_CERT y AFIP_KEY.";
+  }
+  return "Error al crear factura. Intenta de nuevo o revisa los logs.";
+}
+
+// In-memory state for pending product invoices awaiting a description
+interface PendingInput {
+  amount: number;
+  date: Date;
+  messageId: number;
+  timestamp: number;
+  concepto?: Concepto;
+  description?: string;
+  waitingFor?: "description" | "receptor";
+}
+const pendingInputs = new Map<number, PendingInput>();
 
 function getAfipEnv(env: Env): "testing" | "production" {
   return env.AFIP_ENV === "production" ? "production" : "testing";
@@ -193,13 +222,17 @@ async function handleMessage(
       chatId,
       `<b>TARCA</b>${envTag}\n` +
         `Facturacion electronica por Telegram\n\n` +
-        `Enviame un monto para crear una Factura C:\n\n` +
-        `  <code>15000</code>  -  fecha de hoy\n` +
-        `  <code>15000 28/03</code>  -  con fecha\n` +
-        `  <code>1.500,50</code>  -  con decimales\n\n` +
+        `Enviame un monto y te pregunto el resto:\n` +
+        `<pre>` +
+        `15000\n` +
+        `15000 28/03\n` +
+        `1.500,50` +
+        `</pre>` +
         `<b>Comandos</b>\n` +
-        `  /check  -  ultima factura emitida\n` +
-        `  /check 3  -  consultar factura #3`
+        `  /check - ultima factura\n` +
+        `  /check 3 - consultar factura #3\n` +
+        `  /anular 3 - anular factura #3\n` +
+        `  /resumen - resumen del mes`
     );
     return;
   }
@@ -219,13 +252,17 @@ async function handleMessage(
         return;
       }
 
-      // If no number given, get the last one
-      const targetNro = cbteNro > 0
-        ? cbteNro
-        : await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+      const lastNro = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
 
-      if (targetNro === 0) {
+      if (lastNro === 0) {
         await sendMessage(token, chatId, "No hay facturas emitidas en este punto de venta.");
+        return;
+      }
+
+      const targetNro = cbteNro > 0 ? cbteNro : lastNro;
+
+      if (targetNro > lastNro) {
+        await sendMessage(token, chatId, `Factura #${targetNro} no existe. La ultima es la #${lastNro}.`);
         return;
       }
 
@@ -239,17 +276,283 @@ async function handleMessage(
       await sendMessage(
         token,
         chatId,
-        `<b>Factura C  ${formatCbteNro(ptoVta, targetNro)}</b>\n` +
-          `${estado === "Aprobada" ? "Aprobada por ARCA" : "RECHAZADA"}\n\n` +
-          `Importe  <b>${importe}</b>\n` +
-          `Fecha  ${fchEmision}\n\n` +
-          `CAE  <code>${info.cae}</code>\n` +
-          `Vencimiento  ${fchVto}`
+        `<b>Factura C ${formatCbteNro(ptoVta, targetNro)}</b>\n` +
+          `${estado === "Aprobada" ? "Aprobada por ARCA" : "RECHAZADA"}\n` +
+          `<pre>` +
+          `Importe  ${importe}\n` +
+          `Fecha    ${fchEmision}\n` +
+          `CAE      ${info.cae}\n` +
+          `Vto CAE  ${fchVto}` +
+          `</pre>`
       );
     } catch (error) {
       console.error("Check failed:", error);
       await sendMessage(token, chatId, "Error al consultar factura.");
     }
+    return;
+  }
+
+  // Handle /anular command - create credit note to reverse an invoice
+  if (text.startsWith("/anular")) {
+    const parts = text.split(/\s+/);
+    const cbteNro = parts[1] ? parseInt(parts[1], 10) : 0;
+
+    if (!cbteNro || isNaN(cbteNro) || cbteNro <= 0) {
+      await sendMessage(token, chatId, "Uso: <code>/anular 3</code> (numero de factura)");
+      return;
+    }
+
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      // Check invoice exists
+      const lastNro = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+      if (cbteNro > lastNro) {
+        await sendMessage(token, chatId, `Factura #${cbteNro} no existe. La ultima es la #${lastNro}.`);
+        return;
+      }
+
+      const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, cbteNro, afipEnv);
+
+      if (!info.cae || info.resultado !== "A") {
+        await sendMessage(token, chatId, `Factura #${cbteNro} no encontrada o no esta aprobada.`);
+        return;
+      }
+
+      const importe = formatCurrency(parseFloat(info.impTotal));
+      const fchEmision = info.cbteFch ? formatDateAR(parseDateYMD(info.cbteFch)) : "-";
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: "Anular", callback_data: `anular:${cbteNro}` },
+            { text: "Cancelar", callback_data: "cancel" },
+          ],
+        ],
+      };
+
+      await sendMessage(
+        token,
+        chatId,
+        `<b>Anular Factura C ${formatCbteNro(ptoVta, cbteNro)}</b>\n` +
+          `<pre>` +
+          `Monto  ${importe}\n` +
+          `Fecha  ${fchEmision}` +
+          `</pre>` +
+          `Se emitira una <b>Nota de Credito C</b> por el mismo monto.`,
+        keyboard
+      );
+    } catch (error) {
+      console.error("Anular lookup failed:", error);
+      await sendMessage(token, chatId, "Error al consultar factura.");
+    }
+    return;
+  }
+
+  // Handle /resumen command - monthly summary
+  if (text.startsWith("/resumen")) {
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const today = nowAR();
+      const currentMonth = today.getMonth();
+      const currentYear = today.getFullYear();
+      const monthLabel = today.toLocaleDateString("es-AR", { month: "long" }).toUpperCase();
+      const yearLabel = today.getFullYear();
+
+      // Get last invoice number for Factura C
+      const lastFactura = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+
+      if (lastFactura === 0) {
+        await sendMessage(token, chatId, "No hay facturas emitidas.");
+        return;
+      }
+
+      // Iterate backwards through invoices, collecting current month ones
+      let totalFacturas = 0;
+      let sumFacturas = 0;
+      const invoices: { nro: number; amount: number; date: string }[] = [];
+
+      for (let i = lastFactura; i >= 1; i--) {
+        const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, i, afipEnv);
+        if (!info.cbteFch) continue;
+
+        const invDate = parseDateYMD(info.cbteFch);
+        if (invDate.getFullYear() !== currentYear || invDate.getMonth() !== currentMonth) {
+          break; // Past invoices are in order, so we can stop
+        }
+
+        if (info.resultado === "A") {
+          const amount = parseFloat(info.impTotal);
+          totalFacturas++;
+          sumFacturas += amount;
+          invoices.push({ nro: i, amount, date: formatDateAR(invDate) });
+        }
+      }
+
+      // Check credit notes (Nota de Credito C = 13)
+      const lastNC = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 13, afipEnv);
+      let totalNC = 0;
+      let sumNC = 0;
+
+      for (let i = lastNC; i >= 1; i--) {
+        const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, i, afipEnv, 13);
+        if (!info.cbteFch) continue;
+
+        const invDate = parseDateYMD(info.cbteFch);
+        if (invDate.getFullYear() !== currentYear || invDate.getMonth() !== currentMonth) {
+          break;
+        }
+
+        if (info.resultado === "A") {
+          totalNC++;
+          sumNC += parseFloat(info.impTotal);
+        }
+      }
+
+      const neto = sumFacturas - sumNC;
+
+      // Build summary message
+      let msg = `<b>Resumen | ${monthLabel} ${yearLabel}</b>\n\n`;
+
+      if (invoices.length === 0 && totalNC === 0) {
+        msg += "No hay comprobantes emitidos este mes.";
+      } else {
+        msg += `<pre>`;
+        for (const inv of invoices.reverse()) {
+          const amt = formatCurrency(inv.amount).padStart(12);
+          msg += `#${String(inv.nro).padStart(3)}  ${amt}  ${inv.date}\n`;
+        }
+
+        if (totalNC > 0) {
+          msg += `\nNotas de credito: ${totalNC}\n`;
+        }
+
+        msg += `\n`;
+        msg += `Facturado ${formatCurrency(sumFacturas)}`;
+        if (totalNC > 0) {
+          msg += `\nAnulado   ${formatCurrency(sumNC)}`;
+          msg += `\nNeto      ${formatCurrency(neto)}`;
+        }
+        msg += `</pre>`;
+        msg += `${totalFacturas} factura${totalFacturas !== 1 ? "s" : ""}`;
+      }
+
+      await sendMessage(token, chatId, msg);
+    } catch (error) {
+      console.error("Resumen failed:", error);
+      await sendMessage(token, chatId, "Error al generar resumen.");
+    }
+    return;
+  }
+
+  // Check if we're waiting for user input (description or receptor)
+  const pending = pendingInputs.get(chatId);
+  if (pending && !text.startsWith("/")) {
+    if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+      pendingInputs.delete(chatId);
+      await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
+      return;
+    }
+
+    pendingInputs.delete(chatId);
+    const datePayload = formatDateYMD(pending.date);
+    const afipEnv = getAfipEnv(env);
+    const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+    const isProduct = pending.concepto === 1;
+    const tipoLabel = isProduct ? "Producto" : "Servicio";
+
+    if (pending.waitingFor === "receptor") {
+      // Parse CUIT (11 digits) or DNI (7-8 digits)
+      const cleaned = text.replace(/[-.\s]/g, "");
+      if (!/^\d{7,11}$/.test(cleaned)) {
+        // Not valid, re-set pending and ask again
+        pendingInputs.set(chatId, pending);
+        await sendMessage(token, chatId, "Ingresa un CUIT (11 digitos) o DNI (7-8 digitos).");
+        return;
+      }
+
+      const docTipo = cleaned.length >= 11 ? 80 : 96;
+      const docTipoLabel = docTipo === 80 ? "CUIT" : "DNI";
+      const descShort = (pending.description || "Serv.Informaticos").substring(0, 15);
+
+      const callbackData = isProduct
+        ? `venta:${pending.amount}:${datePayload}:${descShort}:${docTipo}:${cleaned}`
+        : `confirm:${pending.amount}:${datePayload}:${docTipo}:${cleaned}`;
+
+      const conceptoLabel = pending.description || "Servicios Informaticos";
+
+      // Show full confirmation view with all options
+      const confirmKeyboard = {
+        inline_keyboard: [
+          [
+            { text: "CONFIRMAR", callback_data: callbackData },
+          ],
+          [
+            { text: "Cambiar concepto", callback_data: isProduct ? `tipo:v:${pending.amount}:${datePayload}` : `tipo:sn:${pending.amount}:${datePayload}` },
+            { text: "Quitar receptor", callback_data: `review:${pending.amount}:${datePayload}:${pending.concepto || 2}:${descShort}` },
+          ],
+          [
+            { text: "Cancelar", callback_data: "cancel" },
+          ],
+        ],
+      };
+
+      await sendMessage(
+        token,
+        chatId,
+        `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(pending.amount)}\n` +
+          `Fecha    ${formatDateAR(pending.date)}\n` +
+          `Concepto ${conceptoLabel}\n` +
+          `Receptor ${docTipoLabel} ${cleaned}` +
+          `</pre>`,
+        confirmKeyboard
+      );
+      return;
+    }
+
+    // Waiting for description (product name or custom service name)
+    const description = text.substring(0, 30);
+    const descShort = description.substring(0, 15);
+
+    const callbackData = !isProduct
+      ? `confirm:${pending.amount}:${datePayload}`
+      : `venta:${pending.amount}:${datePayload}:${descShort}`;
+
+    // Full confirmation view
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "CONFIRMAR", callback_data: callbackData },
+        ],
+        [
+          { text: "Cambiar concepto", callback_data: isProduct ? `tipo:v:${pending.amount}:${datePayload}` : `tipo:sn:${pending.amount}:${datePayload}` },
+          { text: "Identificar receptor", callback_data: `recep:${pending.amount}:${datePayload}:${pending.concepto || 2}:${descShort}` },
+        ],
+        [
+          { text: "Cancelar", callback_data: "cancel" },
+        ],
+      ],
+    };
+
+    await sendMessage(
+      token,
+      chatId,
+      `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
+        `<pre>` +
+        `Monto    ${formatCurrency(pending.amount)}\n` +
+        `Fecha    ${formatDateAR(pending.date)}\n` +
+        `Concepto ${description}\n` +
+        `Receptor Consumidor Final` +
+        `</pre>`,
+      confirmKeyboard
+    );
     return;
   }
 
@@ -260,40 +563,50 @@ async function handleMessage(
     await sendMessage(
       token,
       chatId,
-      "No entendi. Enviame un monto, opcionalmente con fecha.\n\n" +
-        "Ej: <code>15000</code> o <code>15000 28/03</code>"
+      `No entendi. Enviame un monto para facturar:\n` +
+        `<pre>` +
+        `15000\n` +
+        `15000 28/03\n` +
+        `1.500,50` +
+        `</pre>` +
+        `<b>Comandos</b>\n` +
+        `  /check - ultima factura\n` +
+        `  /anular 3 - anular factura #3\n` +
+        `  /resumen - resumen del mes`
     );
     return;
   }
 
   const { amount, date } = parsed;
   const dateStr = formatDateAR(date);
-
-  // callback_data format: "confirm:<amount>:<YYYYMMDD>"
   const datePayload = formatDateYMD(date);
-  const confirmKeyboard = {
+  const todayAR = nowAR();
+  const isToday = formatDateYMD(date) === formatDateYMD(todayAR);
+
+  const afipEnv = getAfipEnv(env);
+  const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+
+  // Step 1: Ask servicio or venta
+  const typeKeyboard = {
     inline_keyboard: [
       [
-        { text: "Confirmar", callback_data: `confirm:${amount}:${datePayload}` },
+        { text: "Servicio", callback_data: `tipo:s:${amount}:${datePayload}` },
+        { text: "Venta", callback_data: `tipo:v:${amount}:${datePayload}` },
         { text: "Cancelar", callback_data: "cancel" },
       ],
     ],
   };
 
-  const afipEnv = getAfipEnv(env);
-  const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
-  const todayAR = nowAR();
-  const isToday = formatDateYMD(date) === formatDateYMD(todayAR);
-
   await sendMessage(
     token,
     chatId,
-    `<b>Nueva Factura C</b>${envLabel}\n\n` +
-      `Monto  <b>${formatCurrency(amount)}</b>\n` +
-      `Fecha  ${dateStr}${isToday ? " (hoy)" : ""}\n` +
-      `Concepto  Servicios Informaticos\n` +
-      `Receptor  Consumidor Final`,
-    confirmKeyboard
+    `<b>Nueva Factura C</b>${envLabel}\n` +
+      `<pre>` +
+      `Monto ${formatCurrency(amount)}\n` +
+      `Fecha ${dateStr}${isToday ? " (hoy)" : ""}` +
+      `</pre>` +
+      `Servicio o venta?`,
+    typeKeyboard
   );
 }
 
@@ -322,16 +635,327 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (query.data.startsWith("confirm:")) {
+  if (query.data.startsWith("tipo:")) {
+    const parts = query.data.split(":");
+    const tipo = parts[1]; // "s" or "v"
+    const amount = parseFloat(parts[2]);
+    const dateStr = parts[3];
+
+    if (isNaN(amount) || !dateStr) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+    const dateFormatted = formatDateAR(date);
+
+    if (tipo === "s") {
+      // Service: show default name, offer to change or identify receptor
+      const serviceKeyboard = {
+        inline_keyboard: [
+          [
+            { text: "CONFIRMAR", callback_data: `confirm:${amount}:${dateStr}` },
+          ],
+          [
+            { text: "Cambiar concepto", callback_data: `tipo:sn:${amount}:${dateStr}` },
+            { text: "Identificar receptor", callback_data: `recep:${amount}:${dateStr}:2:Serv.Informaticos` },
+          ],
+          [
+            { text: "Cancelar", callback_data: "cancel" },
+          ],
+        ],
+      };
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nueva Factura C - Servicio</b>\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(amount)}\n` +
+          `Fecha    ${dateFormatted}\n` +
+          `Concepto Servicios Informaticos\n` +
+          `Receptor Consumidor Final` +
+          `</pre>`,
+        serviceKeyboard
+      );
+    } else if (tipo === "sn") {
+      // Service with custom name: ask for it
+      pendingInputs.set(chatId, {
+        amount,
+        date,
+        messageId,
+        timestamp: Date.now(),
+        concepto: 2,
+      });
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nueva Factura C - Servicio</b>\n` +
+          `<pre>` +
+          `Monto ${formatCurrency(amount)}\n` +
+          `Fecha ${dateFormatted}` +
+          `</pre>` +
+          `Enviame el nombre del servicio:`
+      );
+    } else {
+      // Product: ask for description
+      pendingInputs.set(chatId, {
+        amount,
+        date,
+        messageId,
+        timestamp: Date.now(),
+        concepto: 1,
+      });
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nueva Factura C - Producto</b>\n` +
+          `<pre>` +
+          `Monto ${formatCurrency(amount)}\n` +
+          `Fecha ${dateFormatted}` +
+          `</pre>` +
+          `Enviame el nombre del producto:`
+      );
+    }
+    return;
+  }
+
+  // Review: show full confirmation view without creating (used by "Quitar receptor" etc)
+  if (query.data.startsWith("review:")) {
     const parts = query.data.split(":");
     const amount = parseFloat(parts[1]);
-    const dateStr = parts[2]; // YYYYMMDD
+    const dateStr = parts[2];
+    const concepto = parseInt(parts[3], 10) as Concepto;
+    const description = parts.slice(4).join(":");
+
+    if (isNaN(amount) || !dateStr) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+    const isProduct = concepto === 1;
+    const tipoLabel = isProduct ? "Producto" : "Servicio";
+    const conceptoLabel = description || "Servicios Informaticos";
+    const descShort = conceptoLabel.substring(0, 15);
+
+    const callbackData = isProduct
+      ? `venta:${amount}:${dateStr}:${descShort}`
+      : `confirm:${amount}:${dateStr}`;
+
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "CONFIRMAR", callback_data: callbackData },
+        ],
+        [
+          { text: "Cambiar concepto", callback_data: isProduct ? `tipo:v:${amount}:${dateStr}` : `tipo:sn:${amount}:${dateStr}` },
+          { text: "Identificar receptor", callback_data: `recep:${amount}:${dateStr}:${concepto}:${descShort}` },
+        ],
+        [
+          { text: "Cancelar", callback_data: "cancel" },
+        ],
+      ],
+    };
+
+    const afipEnv = getAfipEnv(env);
+    const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+
+    await editMessageText(
+      token,
+      chatId,
+      messageId,
+      `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
+        `<pre>` +
+        `Monto    ${formatCurrency(amount)}\n` +
+        `Fecha    ${formatDateAR(date)}\n` +
+        `Concepto ${conceptoLabel}\n` +
+        `Receptor Consumidor Final` +
+        `</pre>`,
+      confirmKeyboard
+    );
+    return;
+  }
+
+  if (query.data.startsWith("recep:")) {
+    const parts = query.data.split(":");
+    const amount = parseFloat(parts[1]);
+    const dateStr = parts[2];
+    const concepto = parseInt(parts[3], 10) as Concepto;
+    const description = parts.slice(4).join(":");
+
+    if (isNaN(amount) || !dateStr) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    // Encode state in callback_data for CUIT/DNI buttons instead of using memory
+    const ctx = `${amount}:${dateStr}:${concepto}:${description}`;
+
+    await editMessageText(
+      token,
+      chatId,
+      messageId,
+      `<b>Identificar receptor</b>\n\n` +
+        `Enviame el CUIT (11 digitos) o DNI (7-8 digitos):`
+    );
+    pendingInputs.set(chatId, {
+      amount,
+      date: parseDateYMD(dateStr),
+      messageId,
+      timestamp: Date.now(),
+      concepto: concepto as Concepto,
+      description: description || undefined,
+      waitingFor: "receptor",
+    });
+    return;
+  }
+
+  if (query.data.startsWith("venta:")) {
+    // Format: venta:amount:date:desc or venta:amount:date:desc:docTipo:docNro
+    const parts = query.data.split(":");
+    const amount = parseFloat(parts[1]);
+    const dateStr = parts[2];
+    const description = parts[3] || "Producto";
+    const docTipo = parts[4] ? parseInt(parts[4], 10) : 99;
+    const docNro = parts[5] ? parseInt(parts[5], 10) : 0;
+
     if (isNaN(amount) || !dateStr || amount <= 0 || amount > MAX_AMOUNT) {
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
 
     const date = parseDateYMD(dateStr);
+    const receiver: ReceiverDoc = { docTipo, docNro };
+
+    await editMessageText(
+      token,
+      chatId,
+      messageId,
+      `Procesando factura por ${formatCurrency(amount)}...`
+    );
+
+    try {
+      const afipEnv = getAfipEnv(env);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const result = await createInvoice(
+        auth,
+        env.AFIP_CUIT,
+        parseInt(env.AFIP_PTO_VTA, 10),
+        amount,
+        afipEnv,
+        date,
+        1, // Concepto = Productos
+        receiver
+      );
+
+      const envLabel = afipEnv === "testing" ? "\n\n<i>[TESTING]</i>" : "";
+      const fchVto = result.caeFchVto
+        ? formatDateAR(parseDateYMD(result.caeFchVto))
+        : result.caeFchVto;
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Factura C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+          `Aprobada por ARCA\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(amount)}\n` +
+          `Fecha    ${formatDateAR(date)}\n` +
+          `Concepto ${description}\n` +
+          `CAE      ${result.cae}\n` +
+          `Vto CAE  ${fchVto}` +
+          `</pre>` +
+          envLabel
+      );
+    } catch (error) {
+      console.error("Product invoice failed:", error);
+      await editMessageText(token, chatId, messageId, friendlyError(error));
+    }
+    return;
+  }
+
+  if (query.data.startsWith("anular:")) {
+    const cbteNro = parseInt(query.data.split(":")[1], 10);
+    if (isNaN(cbteNro) || cbteNro <= 0) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    await editMessageText(token, chatId, messageId, "Procesando nota de credito...");
+
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const original = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, cbteNro, afipEnv);
+      if (!original.cae || original.resultado !== "A") {
+        await editMessageText(token, chatId, messageId, "Factura no encontrada o no aprobada.");
+        return;
+      }
+
+      const result = await createCreditNote(
+        auth,
+        env.AFIP_CUIT,
+        ptoVta,
+        original,
+        afipEnv,
+        nowAR()
+      );
+
+      const importe = formatCurrency(parseFloat(original.impTotal));
+      const fchVto = result.caeFchVto
+        ? formatDateAR(parseDateYMD(result.caeFchVto))
+        : result.caeFchVto;
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nota de Credito C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+          `Aprobada por ARCA\n` +
+          `<pre>` +
+          `Anula    Factura C #${cbteNro}\n` +
+          `Monto    ${importe}\n` +
+          `CAE      ${result.cae}\n` +
+          `Vto CAE  ${fchVto}` +
+          `</pre>`
+      );
+    } catch (error) {
+      console.error("Credit note failed:", error);
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        "Error al crear nota de credito. Revisa los logs."
+      );
+    }
+    return;
+  }
+
+  if (query.data.startsWith("confirm:")) {
+    const parts = query.data.split(":");
+    const amount = parseFloat(parts[1]);
+    const dateStr = parts[2]; // YYYYMMDD
+    // Optional: parts[3]=docTipo, parts[4]=docNro
+    const docTipo = parts[3] ? parseInt(parts[3], 10) : 99;
+    const docNro = parts[4] ? parseInt(parts[4], 10) : 0;
+
+    if (isNaN(amount) || !dateStr || amount <= 0 || amount > MAX_AMOUNT) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+    const receiver: ReceiverDoc = { docTipo, docNro };
 
     // Remove keyboard and show progress (prevents double-tap)
     await editMessageText(
@@ -356,7 +980,9 @@ async function handleCallbackQuery(
         parseInt(env.AFIP_PTO_VTA, 10),
         amount,
         afipEnv,
-        date
+        date,
+        2,
+        receiver
       );
 
       const envLabel = afipEnv === "testing" ? "\n\n<i>[TESTING]</i>" : "";
@@ -368,23 +994,20 @@ async function handleCallbackQuery(
         token,
         chatId,
         messageId,
-        `<b>Factura C  ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
-          `Aprobada por ARCA\n\n` +
-          `Monto  <b>${formatCurrency(amount)}</b>\n` +
-          `Fecha  ${formatDateAR(date)}\n` +
-          `Concepto  Servicios Informaticos\n\n` +
-          `CAE  <code>${result.cae}</code>\n` +
-          `Vencimiento  ${fchVto}` +
+        `<b>Factura C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+          `Aprobada por ARCA\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(amount)}\n` +
+          `Fecha    ${formatDateAR(date)}\n` +
+          `Concepto Servicios Informaticos\n` +
+          `CAE      ${result.cae}\n` +
+          `Vto CAE  ${fchVto}` +
+          `</pre>` +
           envLabel
       );
     } catch (error) {
       console.error("Invoice creation failed:", error);
-      await editMessageText(
-        token,
-        chatId,
-        messageId,
-        "Error al crear factura. Intenta de nuevo o revisa los logs."
-      );
+      await editMessageText(token, chatId, messageId, friendlyError(error));
     }
   }
 }

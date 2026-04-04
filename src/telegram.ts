@@ -81,13 +81,15 @@ export async function editMessageText(
   token: string,
   chatId: number,
   messageId: number,
-  text: string
+  text: string,
+  replyMarkup?: unknown
 ): Promise<void> {
   await callApi(token, "editMessageText", {
     chat_id: chatId,
     message_id: messageId,
     text,
     parse_mode: "HTML",
+    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   });
 }
 
