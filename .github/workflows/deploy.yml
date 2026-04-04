@@ -44,3 +44,14 @@ jobs:
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "### Deployed to Cloudflare Workers" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | \`${{ vars.AFIP_ENV || 'testing' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CUIT** | \`${{ vars.AFIP_CUIT }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Pto Venta** | \`${{ vars.AFIP_PTO_VTA }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${GITHUB_SHA::7}\` |" >> $GITHUB_STEP_SUMMARY
