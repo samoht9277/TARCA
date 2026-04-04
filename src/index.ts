@@ -252,13 +252,17 @@ async function handleMessage(
         return;
       }
 
-      // If no number given, get the last one
-      const targetNro = cbteNro > 0
-        ? cbteNro
-        : await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+      const lastNro = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
 
-      if (targetNro === 0) {
+      if (lastNro === 0) {
         await sendMessage(token, chatId, "No hay facturas emitidas en este punto de venta.");
+        return;
+      }
+
+      const targetNro = cbteNro > 0 ? cbteNro : lastNro;
+
+      if (targetNro > lastNro) {
+        await sendMessage(token, chatId, `Factura #${targetNro} no existe. La ultima es la #${lastNro}.`);
         return;
       }
 
@@ -302,6 +306,13 @@ async function handleMessage(
       const afipEnv = getAfipEnv(env);
       const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      // Check invoice exists
+      const lastNro = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+      if (cbteNro > lastNro) {
+        await sendMessage(token, chatId, `Factura #${cbteNro} no existe. La ultima es la #${lastNro}.`);
+        return;
+      }
 
       const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, cbteNro, afipEnv);
 
