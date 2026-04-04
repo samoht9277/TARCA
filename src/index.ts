@@ -16,7 +16,7 @@ import {
   setWebhook,
 } from "./telegram";
 import { authenticate } from "./afip/wsaa";
-import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber } from "./afip/wsfev1";
+import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, type Concepto } from "./afip/wsfev1";
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
@@ -198,6 +198,7 @@ async function handleMessage(
         `  <code>15000 28/03</code>  -  con fecha\n` +
         `  <code>1.500,50</code>  -  con decimales\n\n` +
         `<b>Comandos</b>\n` +
+        `  /venta 5000 Teclado  -  factura producto\n` +
         `  /check  -  ultima factura emitida\n` +
         `  /check 3  -  consultar factura #3\n` +
         `  /anular 3  -  anular factura #3\n` +
@@ -408,6 +409,59 @@ async function handleMessage(
     return;
   }
 
+  // Handle /venta command - product invoice with description
+  if (text.startsWith("/venta")) {
+    const rest = text.replace(/^\/venta\s*/, "");
+    const ventaMatch = rest.match(/^([\d.,]+)\s+(.+)$/);
+
+    if (!ventaMatch) {
+      await sendMessage(
+        token,
+        chatId,
+        "Uso: <code>/venta 5000 Teclado mecanico</code>"
+      );
+      return;
+    }
+
+    const amount = parseAmountStr(ventaMatch[1]);
+    const description = ventaMatch[2].trim();
+
+    if (amount === null) {
+      await sendMessage(token, chatId, "Monto invalido.");
+      return;
+    }
+
+    const date = nowAR();
+    const datePayload = formatDateYMD(date);
+    // callback_data: "venta:<amount>:<YYYYMMDD>:<description>" (truncate desc to fit 64 bytes)
+    const descShort = description.substring(0, 20);
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "Confirmar", callback_data: `venta:${amount}:${datePayload}:${descShort}` },
+          { text: "Cancelar", callback_data: "cancel" },
+        ],
+      ],
+    };
+
+    const afipEnv = getAfipEnv(env);
+    const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+
+    await sendMessage(
+      token,
+      chatId,
+      `<b>Nueva Factura C - Producto</b>${envLabel}\n` +
+        `<pre>` +
+        `Monto    ${formatCurrency(amount)}\n` +
+        `Fecha    ${formatDateAR(date)} (hoy)\n` +
+        `Concepto ${description}\n` +
+        `Receptor Consumidor Final` +
+        `</pre>`,
+      confirmKeyboard
+    );
+    return;
+  }
+
   // Parse amount and optional date
   const parsed = parseInput(text);
 
@@ -476,6 +530,71 @@ async function handleCallbackQuery(
 
   if (query.data === "cancel") {
     await editMessageText(token, chatId, messageId, "Cancelado.");
+    return;
+  }
+
+  if (query.data.startsWith("venta:")) {
+    const parts = query.data.split(":");
+    const amount = parseFloat(parts[1]);
+    const dateStr = parts[2];
+    const description = parts.slice(3).join(":");
+    if (isNaN(amount) || !dateStr || amount <= 0 || amount > MAX_AMOUNT) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+
+    await editMessageText(
+      token,
+      chatId,
+      messageId,
+      `Procesando factura por ${formatCurrency(amount)}...`
+    );
+
+    try {
+      const afipEnv = getAfipEnv(env);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const result = await createInvoice(
+        auth,
+        env.AFIP_CUIT,
+        parseInt(env.AFIP_PTO_VTA, 10),
+        amount,
+        afipEnv,
+        date,
+        1 // Concepto = Productos
+      );
+
+      const envLabel = afipEnv === "testing" ? "\n\n<i>[TESTING]</i>" : "";
+      const fchVto = result.caeFchVto
+        ? formatDateAR(parseDateYMD(result.caeFchVto))
+        : result.caeFchVto;
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Factura C ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+          `Aprobada por ARCA\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(amount)}\n` +
+          `Fecha    ${formatDateAR(date)}\n` +
+          `Concepto ${description}\n` +
+          `CAE      ${result.cae}\n` +
+          `Vto CAE  ${fchVto}` +
+          `</pre>` +
+          envLabel
+      );
+    } catch (error) {
+      console.error("Product invoice failed:", error);
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        "Error al crear factura. Intenta de nuevo o revisa los logs."
+      );
+    }
     return;
   }
 

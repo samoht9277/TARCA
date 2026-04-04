@@ -102,16 +102,26 @@ export async function getLastInvoiceNumber(
  * Create a Factura C for Consumidor Final (Monotributista).
  * Retries once on invoice number collision (concurrent request race).
  */
+export type Concepto = 1 | 2; // 1 = Productos, 2 = Servicios
+
 export async function createInvoice(
   auth: AuthCredentials,
   cuit: string,
   ptoVta: number,
   amount: number,
   env: "testing" | "production" = "testing",
-  date: Date = new Date()
+  date: Date = new Date(),
+  concepto: Concepto = 2
 ): Promise<InvoiceResult> {
   const cbteTipo = 11; // Factura C
   const fch = formatDate(date);
+
+  // Service date fields only required for Concepto 2 (Servicios)
+  const serviceDates = concepto === 2
+    ? `<ar:FchServDesde>${fch}</ar:FchServDesde>
+            <ar:FchServHasta>${fch}</ar:FchServHasta>
+            <ar:FchVtoPago>${fch}</ar:FchVtoPago>`
+    : "";
 
   // Retry once on number collision
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -127,7 +137,7 @@ export async function createInvoice(
         </ar:FeCabReq>
         <ar:FeDetReq>
           <ar:FECAEDetRequest>
-            <ar:Concepto>2</ar:Concepto>
+            <ar:Concepto>${concepto}</ar:Concepto>
             <ar:DocTipo>99</ar:DocTipo>
             <ar:DocNro>0</ar:DocNro>
             <ar:CbteDesde>${nextNro}</ar:CbteDesde>
@@ -139,9 +149,7 @@ export async function createInvoice(
             <ar:ImpOpEx>0</ar:ImpOpEx>
             <ar:ImpIVA>0</ar:ImpIVA>
             <ar:ImpTrib>0</ar:ImpTrib>
-            <ar:FchServDesde>${fch}</ar:FchServDesde>
-            <ar:FchServHasta>${fch}</ar:FchServHasta>
-            <ar:FchVtoPago>${fch}</ar:FchVtoPago>
+            ${serviceDates}
             <ar:MonId>PES</ar:MonId>
             <ar:MonCotiz>1</ar:MonCotiz>
           </ar:FECAEDetRequest>
