@@ -1,0 +1,23 @@
+{
+  "name": "tarca",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram bot for ARCA (ex-AFIP) invoice creation on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "generate-csr": "node scripts/generate-csr.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "asn1js": "^3.0.5",
+    "pkijs": "^3.2.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260404.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2",
+    "wrangler": "^4.80.0"
+  }
+}
