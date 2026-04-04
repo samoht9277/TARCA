@@ -16,7 +16,7 @@ import {
   setWebhook,
 } from "./telegram";
 import { authenticate } from "./afip/wsaa";
-import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, type Concepto } from "./afip/wsfev1";
+import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, type Concepto, type ReceiverDoc } from "./afip/wsfev1";
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
@@ -51,14 +51,16 @@ function friendlyError(error: unknown): string {
 }
 
 // In-memory state for pending product invoices awaiting a description
-interface PendingVenta {
+interface PendingInput {
   amount: number;
   date: Date;
   messageId: number;
   timestamp: number;
   concepto?: Concepto;
+  description?: string;
+  waitingFor?: "description" | "receptor";
 }
-const pendingVentas = new Map<number, PendingVenta>();
+const pendingInputs = new Map<number, PendingInput>();
 
 function getAfipEnv(env: Env): "testing" | "production" {
   return env.AFIP_ENV === "production" ? "production" : "testing";
@@ -437,24 +439,73 @@ async function handleMessage(
     return;
   }
 
-  // Check if we're waiting for a custom name (product or service)
-  const pending = pendingVentas.get(chatId);
+  // Check if we're waiting for user input (description or receptor)
+  const pending = pendingInputs.get(chatId);
   if (pending && !text.startsWith("/")) {
-    pendingVentas.delete(chatId);
-
     // Expire after 5 minutes
     if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+      pendingInputs.delete(chatId);
       await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
       return;
     }
 
+    if (pending.waitingFor === "receptor") {
+      pendingInputs.delete(chatId);
+      // Parse CUIT (11 digits) or DNI (7-8 digits)
+      const cleaned = text.replace(/[-.\s]/g, "");
+      if (!/^\d{7,11}$/.test(cleaned)) {
+        await sendMessage(token, chatId, "Ingresa un CUIT (11 digitos) o DNI (7-8 digitos).");
+        return;
+      }
+
+      const docTipo = cleaned.length >= 11 ? 80 : 96; // 80=CUIT, 96=DNI
+      const docTipoLabel = docTipo === 80 ? "CUIT" : "DNI";
+      const datePayload = formatDateYMD(pending.date);
+      const descShort = (pending.description || "Servicios Informaticos").substring(0, 15);
+      const isProduct = pending.concepto === 1;
+
+      const callbackData = isProduct
+        ? `venta:${pending.amount}:${datePayload}:${descShort}:${docTipo}:${cleaned}`
+        : `confirm:${pending.amount}:${datePayload}:${docTipo}:${cleaned}`;
+
+      const tipoLabel = isProduct ? "Producto" : "Servicio";
+      const conceptoLabel = pending.description || "Servicios Informaticos";
+
+      const confirmKeyboard = {
+        inline_keyboard: [
+          [
+            { text: "Confirmar", callback_data: callbackData },
+            { text: "Cancelar", callback_data: "cancel" },
+          ],
+        ],
+      };
+
+      const afipEnv = getAfipEnv(env);
+      const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+
+      await sendMessage(
+        token,
+        chatId,
+        `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
+          `<pre>` +
+          `Monto    ${formatCurrency(pending.amount)}\n` +
+          `Fecha    ${formatDateAR(pending.date)}\n` +
+          `Concepto ${conceptoLabel}\n` +
+          `Receptor ${docTipoLabel} ${cleaned}` +
+          `</pre>`,
+        confirmKeyboard
+      );
+      return;
+    }
+
+    // Waiting for description (product name or custom service name)
+    pendingInputs.delete(chatId);
     const description = text.substring(0, 30);
     const datePayload = formatDateYMD(pending.date);
-    const descShort = description.substring(0, 20);
+    const descShort = description.substring(0, 15);
     const isService = pending.concepto === 2;
     const tipoLabel = isService ? "Servicio" : "Producto";
 
-    // Service with custom name uses confirm: callback, product uses venta:
     const callbackData = isService
       ? `confirm:${pending.amount}:${datePayload}`
       : `venta:${pending.amount}:${datePayload}:${descShort}`;
@@ -463,6 +514,9 @@ async function handleMessage(
       inline_keyboard: [
         [
           { text: "Confirmar", callback_data: callbackData },
+          { text: "Identificar receptor", callback_data: `recep:${pending.amount}:${datePayload}:${pending.concepto || 2}:${descShort}` },
+        ],
+        [
           { text: "Cancelar", callback_data: "cancel" },
         ],
       ],
@@ -580,12 +634,15 @@ async function handleCallbackQuery(
     const dateFormatted = formatDateAR(date);
 
     if (tipo === "s") {
-      // Service: show default name, offer to change
+      // Service: show default name, offer to change or identify receptor
       const serviceKeyboard = {
         inline_keyboard: [
           [
             { text: "Confirmar", callback_data: `confirm:${amount}:${dateStr}` },
+          ],
+          [
             { text: "Cambiar nombre", callback_data: `tipo:sn:${amount}:${dateStr}` },
+            { text: "Identificar receptor", callback_data: `recep:${amount}:${dateStr}:2:Serv.Informaticos` },
           ],
           [
             { text: "Cancelar", callback_data: "cancel" },
@@ -603,13 +660,12 @@ async function handleCallbackQuery(
           `Fecha    ${dateFormatted}\n` +
           `Concepto Servicios Informaticos\n` +
           `Receptor Consumidor Final` +
-          `</pre>` +
-          `Confirmar o cambiar nombre del concepto?`,
+          `</pre>`,
         serviceKeyboard
       );
     } else if (tipo === "sn") {
       // Service with custom name: ask for it
-      pendingVentas.set(chatId, {
+      pendingInputs.set(chatId, {
         amount,
         date,
         messageId,
@@ -630,7 +686,7 @@ async function handleCallbackQuery(
       );
     } else {
       // Product: ask for description
-      pendingVentas.set(chatId, {
+      pendingInputs.set(chatId, {
         amount,
         date,
         messageId,
@@ -653,17 +709,56 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (query.data.startsWith("venta:")) {
+  if (query.data.startsWith("recep:")) {
     const parts = query.data.split(":");
     const amount = parseFloat(parts[1]);
     const dateStr = parts[2];
-    const description = parts.slice(3).join(":");
+    const concepto = parseInt(parts[3], 10) as Concepto;
+    const description = parts.slice(4).join(":");
+
+    if (isNaN(amount) || !dateStr) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+
+    pendingInputs.set(chatId, {
+      amount,
+      date,
+      messageId,
+      timestamp: Date.now(),
+      concepto,
+      description: description || undefined,
+      waitingFor: "receptor",
+    });
+
+    await editMessageText(
+      token,
+      chatId,
+      messageId,
+      `<b>Identificar receptor</b>\n\n` +
+        `Enviame el CUIT (11 digitos) o DNI (7-8 digitos):`
+    );
+    return;
+  }
+
+  if (query.data.startsWith("venta:")) {
+    // Format: venta:amount:date:desc or venta:amount:date:desc:docTipo:docNro
+    const parts = query.data.split(":");
+    const amount = parseFloat(parts[1]);
+    const dateStr = parts[2];
+    const description = parts[3] || "Producto";
+    const docTipo = parts[4] ? parseInt(parts[4], 10) : 99;
+    const docNro = parts[5] ? parseInt(parts[5], 10) : 0;
+
     if (isNaN(amount) || !dateStr || amount <= 0 || amount > MAX_AMOUNT) {
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
 
     const date = parseDateYMD(dateStr);
+    const receiver: ReceiverDoc = { docTipo, docNro };
 
     await editMessageText(
       token,
@@ -683,7 +778,8 @@ async function handleCallbackQuery(
         amount,
         afipEnv,
         date,
-        1 // Concepto = Productos
+        1, // Concepto = Productos
+        receiver
       );
 
       const envLabel = afipEnv === "testing" ? "\n\n<i>[TESTING]</i>" : "";
@@ -776,12 +872,17 @@ async function handleCallbackQuery(
     const parts = query.data.split(":");
     const amount = parseFloat(parts[1]);
     const dateStr = parts[2]; // YYYYMMDD
+    // Optional: parts[3]=docTipo, parts[4]=docNro
+    const docTipo = parts[3] ? parseInt(parts[3], 10) : 99;
+    const docNro = parts[4] ? parseInt(parts[4], 10) : 0;
+
     if (isNaN(amount) || !dateStr || amount <= 0 || amount > MAX_AMOUNT) {
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
 
     const date = parseDateYMD(dateStr);
+    const receiver: ReceiverDoc = { docTipo, docNro };
 
     // Remove keyboard and show progress (prevents double-tap)
     await editMessageText(
@@ -806,7 +907,9 @@ async function handleCallbackQuery(
         parseInt(env.AFIP_PTO_VTA, 10),
         amount,
         afipEnv,
-        date
+        date,
+        2,
+        receiver
       );
 
       const envLabel = afipEnv === "testing" ? "\n\n<i>[TESTING]</i>" : "";

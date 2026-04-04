@@ -104,6 +104,11 @@ export async function getLastInvoiceNumber(
  */
 export type Concepto = 1 | 2; // 1 = Productos, 2 = Servicios
 
+export interface ReceiverDoc {
+  docTipo: number; // 80=CUIT, 96=DNI, 99=Consumidor Final
+  docNro: number;
+}
+
 export async function createInvoice(
   auth: AuthCredentials,
   cuit: string,
@@ -111,7 +116,8 @@ export async function createInvoice(
   amount: number,
   env: "testing" | "production" = "testing",
   date: Date = new Date(),
-  concepto: Concepto = 2
+  concepto: Concepto = 2,
+  receiver: ReceiverDoc = { docTipo: 99, docNro: 0 }
 ): Promise<InvoiceResult> {
   const cbteTipo = 11; // Factura C
   const fch = formatDate(date);
@@ -138,8 +144,8 @@ export async function createInvoice(
         <ar:FeDetReq>
           <ar:FECAEDetRequest>
             <ar:Concepto>${concepto}</ar:Concepto>
-            <ar:DocTipo>99</ar:DocTipo>
-            <ar:DocNro>0</ar:DocNro>
+            <ar:DocTipo>${receiver.docTipo}</ar:DocTipo>
+            <ar:DocNro>${receiver.docNro}</ar:DocNro>
             <ar:CbteDesde>${nextNro}</ar:CbteDesde>
             <ar:CbteHasta>${nextNro}</ar:CbteHasta>
             <ar:CbteFch>${fch}</ar:CbteFch>
