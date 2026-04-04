@@ -479,11 +479,11 @@ async function handleMessage(
       const confirmKeyboard = {
         inline_keyboard: [
           [
-            { text: "Confirmar", callback_data: callbackData },
+            { text: "CONFIRMAR", callback_data: callbackData },
           ],
           [
             { text: "Cambiar concepto", callback_data: isProduct ? `tipo:v:${pending.amount}:${datePayload}` : `tipo:sn:${pending.amount}:${datePayload}` },
-            { text: "Quitar receptor", callback_data: isProduct ? `venta:${pending.amount}:${datePayload}:${descShort}` : `confirm:${pending.amount}:${datePayload}` },
+            { text: "Quitar receptor", callback_data: `review:${pending.amount}:${datePayload}:${pending.concepto || 2}:${descShort}` },
           ],
           [
             { text: "Cancelar", callback_data: "cancel" },
@@ -518,7 +518,7 @@ async function handleMessage(
     const confirmKeyboard = {
       inline_keyboard: [
         [
-          { text: "Confirmar", callback_data: callbackData },
+          { text: "CONFIRMAR", callback_data: callbackData },
         ],
         [
           { text: "Cambiar concepto", callback_data: isProduct ? `tipo:v:${pending.amount}:${datePayload}` : `tipo:sn:${pending.amount}:${datePayload}` },
@@ -643,7 +643,7 @@ async function handleCallbackQuery(
       const serviceKeyboard = {
         inline_keyboard: [
           [
-            { text: "Confirmar", callback_data: `confirm:${amount}:${dateStr}` },
+            { text: "CONFIRMAR", callback_data: `confirm:${amount}:${dateStr}` },
           ],
           [
             { text: "Cambiar concepto", callback_data: `tipo:sn:${amount}:${dateStr}` },
@@ -711,6 +711,63 @@ async function handleCallbackQuery(
           `Enviame el nombre del producto:`
       );
     }
+    return;
+  }
+
+  // Review: show full confirmation view without creating (used by "Quitar receptor" etc)
+  if (query.data.startsWith("review:")) {
+    const parts = query.data.split(":");
+    const amount = parseFloat(parts[1]);
+    const dateStr = parts[2];
+    const concepto = parseInt(parts[3], 10) as Concepto;
+    const description = parts.slice(4).join(":");
+
+    if (isNaN(amount) || !dateStr) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    const date = parseDateYMD(dateStr);
+    const isProduct = concepto === 1;
+    const tipoLabel = isProduct ? "Producto" : "Servicio";
+    const conceptoLabel = description || "Servicios Informaticos";
+    const descShort = conceptoLabel.substring(0, 15);
+
+    const callbackData = isProduct
+      ? `venta:${amount}:${dateStr}:${descShort}`
+      : `confirm:${amount}:${dateStr}`;
+
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "CONFIRMAR", callback_data: callbackData },
+        ],
+        [
+          { text: "Cambiar concepto", callback_data: isProduct ? `tipo:v:${amount}:${dateStr}` : `tipo:sn:${amount}:${dateStr}` },
+          { text: "Identificar receptor", callback_data: `recep:${amount}:${dateStr}:${concepto}:${descShort}` },
+        ],
+        [
+          { text: "Cancelar", callback_data: "cancel" },
+        ],
+      ],
+    };
+
+    const afipEnv = getAfipEnv(env);
+    const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
+
+    await editMessageText(
+      token,
+      chatId,
+      messageId,
+      `<b>Nueva Factura C - ${tipoLabel}</b>${envLabel}\n` +
+        `<pre>` +
+        `Monto    ${formatCurrency(amount)}\n` +
+        `Fecha    ${formatDateAR(date)}\n` +
+        `Concepto ${conceptoLabel}\n` +
+        `Receptor Consumidor Final` +
+        `</pre>`,
+      confirmKeyboard
+    );
     return;
   }
 
