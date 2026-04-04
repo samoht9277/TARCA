@@ -734,13 +734,7 @@ async function handleCallbackQuery(
       chatId,
       messageId,
       `<b>Identificar receptor</b>\n\n` +
-        `Enviame el CUIT (11 digitos) o DNI (7-8 digitos):`,
-      {
-        inline_keyboard: [
-          [{ text: "Sin identificar (Consumidor Final)", callback_data: concepto === 1 ? `venta:${amount}:${dateStr}:${description}` : `confirm:${amount}:${dateStr}` }],
-          [{ text: "Cancelar", callback_data: "cancel" }],
-        ],
-      }
+        `Enviame el CUIT (11 digitos) o DNI (7-8 digitos):`
     );
     pendingInputs.set(chatId, {
       amount,
