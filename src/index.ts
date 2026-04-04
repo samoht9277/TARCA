@@ -641,7 +641,7 @@ async function handleCallbackQuery(
             { text: "Confirmar", callback_data: `confirm:${amount}:${dateStr}` },
           ],
           [
-            { text: "Cambiar nombre", callback_data: `tipo:sn:${amount}:${dateStr}` },
+            { text: "Cambiar concepto", callback_data: `tipo:sn:${amount}:${dateStr}` },
             { text: "Identificar receptor", callback_data: `recep:${amount}:${dateStr}:2:Serv.Informaticos` },
           ],
           [
