@@ -33,6 +33,24 @@ export interface Env {
 const MAX_AMOUNT = 10_000_000;
 const AR_TZ_OFFSET = -3 * 60 * 60 * 1000;
 
+/** Constant-time string comparison to prevent timing attacks on secrets. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.length !== bufB.length) {
+    const dummy = new Uint8Array(bufA.length);
+    let r = 1;
+    for (let i = 0; i < bufA.length; i++) r |= bufA[i] ^ dummy[i];
+    return false;
+  }
+  let result = 0;
+  for (let i = 0; i < bufA.length; i++) {
+    result |= bufA[i] ^ bufB[i];
+  }
+  return result === 0;
+}
+
 function friendlyError(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
   if (msg.includes("numero o fecha") || msg.includes("proximo a autorizar")) {
@@ -1068,9 +1086,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // GET /setup?secret=<SETUP_SECRET> - Register webhook with Telegram
-    if (url.pathname === "/setup" && request.method === "GET") {
-      if (!env.SETUP_SECRET || url.searchParams.get("secret") !== env.SETUP_SECRET) {
+    // POST /setup - Register webhook with Telegram (auth via header)
+    if (url.pathname === "/setup" && request.method === "POST") {
+      const providedSecret = request.headers.get("X-Setup-Secret") || "";
+      if (!env.SETUP_SECRET || !timingSafeEqual(providedSecret, env.SETUP_SECRET)) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -1086,9 +1105,9 @@ export default {
 
     // POST /webhook - Telegram webhook handler
     if (url.pathname === "/webhook" && request.method === "POST") {
-      // Verify webhook secret
-      const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
+      // Verify webhook secret (timing-safe to prevent timing attacks)
+      const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+      if (!timingSafeEqual(secret, env.TELEGRAM_WEBHOOK_SECRET)) {
         return new Response("Unauthorized", { status: 401 });
       }
 

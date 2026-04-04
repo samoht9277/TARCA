@@ -113,7 +113,7 @@ This runs type checking and tests before deploying.
 ### 8. Register the webhook
 
 ```bash
-curl "https://tarca.<your-subdomain>.workers.dev/setup?secret=<YOUR_SETUP_SECRET>"
+curl -X POST -H "X-Setup-Secret: <YOUR_SETUP_SECRET>" "https://tarca.<your-subdomain>.workers.dev/setup"
 ```
 
 ### 9. Switch to production
@@ -141,7 +141,9 @@ make help       # show all available commands
 
 - Webhook requests are verified via Telegram's `secret_token` mechanism
 - Only Telegram user IDs in `ALLOWED_CHAT_IDS` can interact with the bot
-- The `/setup` endpoint requires a secret query parameter
+- The `/setup` endpoint requires a secret via `X-Setup-Secret` header (POST only, never in URL)
+- All secret comparisons use constant-time equality checks (timing-safe)
+- SOAP payloads use XML escaping on all interpolated values
 - AFIP error details are logged server-side, not sent to the user
 - The bot only responds to private chats (ignores groups)
 - WSAA auth tokens are cached in-memory to avoid rate limiting
