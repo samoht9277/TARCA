@@ -33,6 +33,23 @@ export interface Env {
 const MAX_AMOUNT = 10_000_000;
 const AR_TZ_OFFSET = -3 * 60 * 60 * 1000;
 
+function friendlyError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.includes("numero o fecha") || msg.includes("proximo a autorizar")) {
+    return "La fecha no puede ser anterior a la ultima factura emitida.";
+  }
+  if (msg.includes("PUNTO DE VENTA") || msg.includes("RECE")) {
+    return "El punto de venta no esta habilitado para factura electronica.";
+  }
+  if (msg.includes("NO AUTORIZADO")) {
+    return "No autorizado a emitir comprobantes. Verifica tu punto de venta.";
+  }
+  if (msg.includes("cert") || msg.includes("Certificado")) {
+    return "Error de certificado. Verifica AFIP_CERT y AFIP_KEY.";
+  }
+  return "Error al crear factura. Intenta de nuevo o revisa los logs.";
+}
+
 // In-memory state for pending product invoices awaiting a description
 interface PendingVenta {
   amount: number;
@@ -658,12 +675,7 @@ async function handleCallbackQuery(
       );
     } catch (error) {
       console.error("Product invoice failed:", error);
-      await editMessageText(
-        token,
-        chatId,
-        messageId,
-        "Error al crear factura. Intenta de nuevo o revisa los logs."
-      );
+      await editMessageText(token, chatId, messageId, friendlyError(error));
     }
     return;
   }
@@ -786,12 +798,7 @@ async function handleCallbackQuery(
       );
     } catch (error) {
       console.error("Invoice creation failed:", error);
-      await editMessageText(
-        token,
-        chatId,
-        messageId,
-        "Error al crear factura. Intenta de nuevo o revisa los logs."
-      );
+      await editMessageText(token, chatId, messageId, friendlyError(error));
     }
   }
 }
