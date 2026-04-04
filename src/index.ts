@@ -214,7 +214,7 @@ async function handleMessage(
   }
 
   // Handle /start command
-  if (text.startsWith("/start")) {
+  if (text.startsWith("/start") || text.startsWith("/help")) {
     const afipEnv = getAfipEnv(env);
     const envTag = afipEnv === "testing" ? " [TESTING]" : "";
     await sendMessage(
