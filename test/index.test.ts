@@ -1,12 +1,84 @@
 import { describe, it, expect } from "vitest";
 import {
   parseInput,
+  parseAmountStr,
   formatDateYMD,
   parseDateYMD,
   formatCbteNro,
   formatCurrency,
   formatDateAR,
 } from "../src/index";
+
+describe("parseAmountStr", () => {
+  it("parses a simple integer", () => {
+    expect(parseAmountStr("15000")).toBe(15000);
+  });
+
+  it("parses decimal with dot", () => {
+    expect(parseAmountStr("15000.50")).toBe(15000.5);
+  });
+
+  it("parses decimal with comma (AR style)", () => {
+    expect(parseAmountStr("15000,50")).toBe(15000.5);
+  });
+
+  it("parses AR thousands format: 1.500,50", () => {
+    expect(parseAmountStr("1.500,50")).toBe(1500.5);
+  });
+
+  it("parses US thousands format: 1,500.50", () => {
+    expect(parseAmountStr("1,500.50")).toBe(1500.5);
+  });
+
+  it("parses AR thousands without decimals: 1.500", () => {
+    expect(parseAmountStr("1.500")).toBe(1500);
+  });
+
+  it("parses multiple AR thousands dots: 1.500.000", () => {
+    expect(parseAmountStr("1.500.000")).toBe(1500000);
+  });
+
+  it("strips $ sign", () => {
+    expect(parseAmountStr("$15000")).toBe(15000);
+  });
+
+  it("strips spaces", () => {
+    expect(parseAmountStr(" 15000 ")).toBe(15000);
+  });
+
+  it("returns null for zero", () => {
+    expect(parseAmountStr("0")).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(parseAmountStr("")).toBeNull();
+  });
+
+  it("returns null for non-numeric text", () => {
+    expect(parseAmountStr("hello")).toBeNull();
+  });
+
+  it("returns null for amounts over 10M", () => {
+    expect(parseAmountStr("10000001")).toBeNull();
+  });
+
+  it("accepts amounts at exactly 10M", () => {
+    expect(parseAmountStr("10000000")).toBe(10000000);
+  });
+
+  it("treats 100.999 as AR thousands (100999)", () => {
+    // 3 digits after dot = thousands separator in AR format
+    expect(parseAmountStr("100.999")).toBe(100999);
+  });
+
+  it("rounds to 2 decimal places", () => {
+    expect(parseAmountStr("100,99")).toBe(100.99);
+  });
+
+  it("parses 100.50 as decimal (not thousands)", () => {
+    expect(parseAmountStr("100.50")).toBe(100.5);
+  });
+});
 
 describe("parseInput", () => {
   it("parses a simple integer amount", () => {
@@ -15,22 +87,10 @@ describe("parseInput", () => {
     expect(result!.amount).toBe(15000);
   });
 
-  it("parses a decimal amount with dot", () => {
-    const result = parseInput("15000.50");
+  it("parses AR format amount: 1.500,50", () => {
+    const result = parseInput("1.500,50");
     expect(result).not.toBeNull();
-    expect(result!.amount).toBe(15000.5);
-  });
-
-  it("parses a decimal amount with comma", () => {
-    const result = parseInput("15000,50");
-    expect(result).not.toBeNull();
-    expect(result!.amount).toBe(15000.5);
-  });
-
-  it("strips $ sign", () => {
-    const result = parseInput("$15000");
-    expect(result).not.toBeNull();
-    expect(result!.amount).toBe(15000);
+    expect(result!.amount).toBe(1500.5);
   });
 
   it("parses amount with dd/mm date", () => {
@@ -71,13 +131,16 @@ describe("parseInput", () => {
     expect(result!.date.getMonth()).toBe(5);
   });
 
-  it("uses today's date when no date provided", () => {
-    const result = parseInput("15000");
-    const today = new Date();
-    expect(result).not.toBeNull();
-    expect(result!.date.getDate()).toBe(today.getDate());
-    expect(result!.date.getMonth()).toBe(today.getMonth());
-    expect(result!.date.getFullYear()).toBe(today.getFullYear());
+  it("returns null for invalid date: Feb 31", () => {
+    expect(parseInput("15000 31/02")).toBeNull();
+  });
+
+  it("returns null for invalid date: month 13", () => {
+    expect(parseInput("15000 15/13")).toBeNull();
+  });
+
+  it("returns null for invalid date: day 32", () => {
+    expect(parseInput("15000 32/01")).toBeNull();
   });
 
   it("returns null for zero amount", () => {
@@ -100,10 +163,8 @@ describe("parseInput", () => {
     expect(parseInput("28/03")).toBeNull();
   });
 
-  it("rounds to 2 decimal places", () => {
-    const result = parseInput("100.999");
-    expect(result).not.toBeNull();
-    expect(result!.amount).toBe(101);
+  it("returns null for amounts over max", () => {
+    expect(parseInput("99999999999")).toBeNull();
   });
 });
 
@@ -148,7 +209,6 @@ describe("formatCbteNro", () => {
 describe("formatCurrency", () => {
   it("formats a number as ARS currency", () => {
     const result = formatCurrency(15000);
-    // Intl format may vary by environment, but should contain the number
     expect(result).toContain("15.000");
   });
 

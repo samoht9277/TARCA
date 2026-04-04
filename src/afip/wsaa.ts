@@ -1,6 +1,6 @@
 /**
- * ARCA/AFIP WSAA (Web Service de Autenticación y Autorización)
- * Handles login ticket generation and authentication.
+ * ARCA/AFIP WSAA (Web Service de Autenticacion y Autorizacion)
+ * Handles login ticket generation and authentication with in-memory caching.
  */
 import { signCMS } from "./cms";
 
@@ -13,6 +13,15 @@ export interface AuthCredentials {
   token: string;
   sign: string;
 }
+
+interface CachedAuth {
+  credentials: AuthCredentials;
+  expiresAt: number;
+}
+
+// In-memory cache. Persists across requests within the same CF Worker isolate.
+// Not shared across isolates, but massively reduces WSAA calls in practice.
+const authCache = new Map<string, CachedAuth>();
 
 function buildLoginTicketRequest(service: string): string {
   const now = new Date();
@@ -44,6 +53,7 @@ function buildSoapEnvelope(cmsBase64: string): string {
 
 /**
  * Authenticate with AFIP WSAA and get Token + Sign for the given service.
+ * Uses in-memory caching to avoid hitting WSAA on every request.
  */
 export async function authenticate(
   certPem: string,
@@ -51,13 +61,34 @@ export async function authenticate(
   env: "testing" | "production" = "testing",
   service: string = "wsfe"
 ): Promise<AuthCredentials> {
-  // 1. Build login ticket request XML
-  const loginTicket = buildLoginTicketRequest(service);
+  const cacheKey = `${env}:${service}`;
+  const cached = authCache.get(cacheKey);
 
-  // 2. Sign it as CMS
+  // Use cached token if still valid (with 60s safety margin)
+  if (cached && cached.expiresAt > Date.now() + 60_000) {
+    return cached.credentials;
+  }
+
+  const credentials = await authenticateFresh(certPem, keyPem, env, service);
+
+  // Cache for 10 minutes (matching our ticket expiration window)
+  authCache.set(cacheKey, {
+    credentials,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+
+  return credentials;
+}
+
+async function authenticateFresh(
+  certPem: string,
+  keyPem: string,
+  env: "testing" | "production",
+  service: string
+): Promise<AuthCredentials> {
+  const loginTicket = buildLoginTicketRequest(service);
   const cmsBase64 = await signCMS(loginTicket, certPem, keyPem);
 
-  // 3. Send SOAP request to WSAA
   const soapBody = buildSoapEnvelope(cmsBase64);
   const response = await fetch(WSAA_URLS[env], {
     method: "POST",
@@ -75,10 +106,15 @@ export async function authenticate(
 
   const responseText = await response.text();
 
-  // 4. Parse response - extract token and sign from the XML
+  // Check for SOAP faults first
+  const faultString = extractXmlContent(responseText, "faultstring");
+  if (faultString) {
+    throw new Error(`WSAA SOAP Fault: ${faultString}`);
+  }
+
   const credentialsXml = extractXmlContent(responseText, "loginCmsReturn");
   if (!credentialsXml) {
-    throw new Error(`WSAA: no loginCmsReturn in response: ${responseText}`);
+    throw new Error(`WSAA: no loginCmsReturn in response`);
   }
 
   // The loginCmsReturn contains HTML-encoded XML, decode it
@@ -92,14 +128,15 @@ export async function authenticate(
   const sign = extractXmlContent(decoded, "sign");
 
   if (!token || !sign) {
-    throw new Error(`WSAA: could not extract token/sign from: ${decoded}`);
+    throw new Error(`WSAA: could not extract token/sign`);
   }
 
   return { token, sign };
 }
 
 function extractXmlContent(xml: string, tag: string): string | null {
-  const regex = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+  // Match both bare and namespaced tags (e.g. <token> or <ns:token>)
+  const regex = new RegExp(`<(?:[a-zA-Z0-9]+:)?${tag}[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9]+:)?${tag}>`);
   const match = xml.match(regex);
   return match ? match[1].trim() : null;
 }

@@ -92,11 +92,15 @@ export async function editMessageText(
 }
 
 /**
- * Register the webhook URL with Telegram.
+ * Register the webhook URL with Telegram, with a secret for verification.
  */
 export async function setWebhook(
   token: string,
-  url: string
+  url: string,
+  secretToken?: string
 ): Promise<void> {
-  await callApi(token, "setWebhook", { url });
+  await callApi(token, "setWebhook", {
+    url,
+    ...(secretToken ? { secret_token: secretToken } : {}),
+  });
 }

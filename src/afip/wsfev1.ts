@@ -1,5 +1,5 @@
 /**
- * ARCA/AFIP WSFEv1 (Web Service de Facturación Electrónica v1)
+ * ARCA/AFIP WSFEv1 (Web Service de Facturacion Electronica v1)
  * Handles electronic invoice creation for Monotributistas.
  */
 import type { AuthCredentials } from "./wsaa";
@@ -65,15 +65,12 @@ async function soapCall(
 }
 
 function extractXml(xml: string, tag: string): string | null {
-  const regex = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+  const regex = new RegExp(`<(?:[a-zA-Z0-9]+:)?${tag}[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9]+:)?${tag}>`);
   const match = xml.match(regex);
   return match ? match[1].trim() : null;
 }
 
-/**
- * Get the last authorized invoice number for the given punto de venta and type.
- */
-async function getLastInvoiceNumber(
+export async function getLastInvoiceNumber(
   auth: AuthCredentials,
   cuit: string,
   ptoVta: number,
@@ -92,10 +89,9 @@ async function getLastInvoiceNumber(
 
   const cbteNro = extractXml(response, "CbteNro");
   if (cbteNro === null) {
-    // Check for errors
     const errMsg = extractXml(response, "Msg");
     throw new Error(
-      `FECompUltimoAutorizado failed: ${errMsg || response}`
+      `FECompUltimoAutorizado failed: ${errMsg || "unknown error"}`
     );
   }
 
@@ -104,9 +100,7 @@ async function getLastInvoiceNumber(
 
 /**
  * Create a Factura C for Consumidor Final (Monotributista).
- *
- * @param amount - Invoice total amount
- * @returns Invoice result with CAE, expiry, and number
+ * Retries once on invoice number collision (concurrent request race).
  */
 export async function createInvoice(
   auth: AuthCredentials,
@@ -117,13 +111,14 @@ export async function createInvoice(
   date: Date = new Date()
 ): Promise<InvoiceResult> {
   const cbteTipo = 11; // Factura C
-  const today = formatDate(date);
+  const fch = formatDate(date);
 
-  // Get next invoice number
-  const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, cbteTipo, env);
-  const nextNro = lastNro + 1;
+  // Retry once on number collision
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, cbteTipo, env);
+    const nextNro = lastNro + 1;
 
-  const body = `${authXml(auth, cuit)}
+    const body = `${authXml(auth, cuit)}
       <ar:FeCAEReq>
         <ar:FeCabReq>
           <ar:CantReg>1</ar:CantReg>
@@ -137,44 +132,101 @@ export async function createInvoice(
             <ar:DocNro>0</ar:DocNro>
             <ar:CbteDesde>${nextNro}</ar:CbteDesde>
             <ar:CbteHasta>${nextNro}</ar:CbteHasta>
-            <ar:CbteFch>${today}</ar:CbteFch>
+            <ar:CbteFch>${fch}</ar:CbteFch>
             <ar:ImpTotal>${amount.toFixed(2)}</ar:ImpTotal>
             <ar:ImpTotConc>0</ar:ImpTotConc>
             <ar:ImpNeto>${amount.toFixed(2)}</ar:ImpNeto>
             <ar:ImpOpEx>0</ar:ImpOpEx>
             <ar:ImpIVA>0</ar:ImpIVA>
             <ar:ImpTrib>0</ar:ImpTrib>
-            <ar:FchServDesde>${today}</ar:FchServDesde>
-            <ar:FchServHasta>${today}</ar:FchServHasta>
-            <ar:FchVtoPago>${today}</ar:FchVtoPago>
+            <ar:FchServDesde>${fch}</ar:FchServDesde>
+            <ar:FchServHasta>${fch}</ar:FchServHasta>
+            <ar:FchVtoPago>${fch}</ar:FchVtoPago>
             <ar:MonId>PES</ar:MonId>
             <ar:MonCotiz>1</ar:MonCotiz>
           </ar:FECAEDetRequest>
         </ar:FeDetReq>
       </ar:FeCAEReq>`;
 
-  const response = await soapCall(WSFEV1_URLS[env], "FECAESolicitar", body);
+    const response = await soapCall(WSFEV1_URLS[env], "FECAESolicitar", body);
 
-  // Check result
-  const resultado = extractXml(response, "Resultado");
-  if (resultado !== "A") {
-    const errMsg = extractXml(response, "Msg") || extractXml(response, "Err");
-    throw new Error(
-      `FECAESolicitar rejected: ${errMsg || response}`
-    );
+    const resultado = extractXml(response, "Resultado");
+    if (resultado !== "A") {
+      // Extract error from <Errors><Err><Msg> first, fall back to top-level <Msg>
+      const errorsBlock = extractXml(response, "Errors");
+      const errMsg = (errorsBlock ? extractXml(errorsBlock, "Msg") : null)
+        || extractXml(response, "Msg")
+        || "";
+
+      // Retry on "not consecutive" error (race condition)
+      if (attempt === 0 && errMsg.toLowerCase().includes("consecutiv")) {
+        continue;
+      }
+
+      console.error("FECAESolicitar full response:", response);
+      throw new Error(`FECAESolicitar rejected: ${errMsg || "unknown error"}`);
+    }
+
+    const cae = extractXml(response, "CAE");
+    const caeFchVto = extractXml(response, "CAEFchVto");
+
+    if (!cae || !caeFchVto) {
+      throw new Error("FECAESolicitar: missing CAE in response");
+    }
+
+    return {
+      cae,
+      caeFchVto,
+      cbteNro: nextNro,
+      ptoVta,
+    };
   }
 
-  const cae = extractXml(response, "CAE");
-  const caeFchVto = extractXml(response, "CAEFchVto");
+  throw new Error("FECAESolicitar: failed after retry");
+}
 
-  if (!cae || !caeFchVto) {
-    throw new Error(`FECAESolicitar: missing CAE in response: ${response}`);
+export interface InvoiceInfo {
+  cae: string;
+  caeFchVto: string;
+  cbteNro: number;
+  ptoVta: number;
+  cbteFch: string;
+  impTotal: string;
+  resultado: string;
+}
+
+/**
+ * Query an existing invoice by number.
+ */
+export async function queryInvoice(
+  auth: AuthCredentials,
+  cuit: string,
+  ptoVta: number,
+  cbteNro: number,
+  env: "testing" | "production" = "testing"
+): Promise<InvoiceInfo> {
+  const cbteTipo = 11; // Factura C
+
+  const body = `${authXml(auth, cuit)}
+      <ar:FeCompConsReq>
+        <ar:CbteTipo>${cbteTipo}</ar:CbteTipo>
+        <ar:CbteNro>${cbteNro}</ar:CbteNro>
+        <ar:PtoVta>${ptoVta}</ar:PtoVta>
+      </ar:FeCompConsReq>`;
+
+  const response = await soapCall(WSFEV1_URLS[env], "FECompConsultar", body);
+
+  const errorsBlock = extractXml(response, "Errors");
+  if (errorsBlock) {
+    const errMsg = extractXml(errorsBlock, "Msg") || "unknown error";
+    throw new Error(`FECompConsultar failed: ${errMsg}`);
   }
 
-  return {
-    cae,
-    caeFchVto,
-    cbteNro: nextNro,
-    ptoVta,
-  };
+  const cae = extractXml(response, "CodAutorizacion") || "";
+  const caeFchVto = extractXml(response, "FchVto") || "";
+  const cbteFch = extractXml(response, "CbteFch") || "";
+  const impTotal = extractXml(response, "ImpTotal") || "";
+  const resultado = extractXml(response, "Resultado") || "";
+
+  return { cae, caeFchVto, cbteNro, ptoVta, cbteFch, impTotal, resultado };
 }

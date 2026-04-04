@@ -4,12 +4,15 @@ compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Secrets (set via `wrangler secret put`):
-# - TELEGRAM_BOT_TOKEN   → from @BotFather
-# - AFIP_CERT            → PEM certificate from ARCA (ex-AFIP)
-# - AFIP_KEY             → PEM private key
-# - AFIP_CUIT            → your CUIT number (no dashes)
-# - AFIP_PTO_VTA         → punto de venta number
+# - TELEGRAM_BOT_TOKEN        -> from @BotFather
+# - TELEGRAM_WEBHOOK_SECRET   -> random string for webhook verification
+# - SETUP_SECRET              -> random string to protect /setup endpoint
+# - ALLOWED_CHAT_IDS          -> comma-separated Telegram user IDs
+# - AFIP_CERT                 -> PEM certificate from ARCA (ex-AFIP)
+# - AFIP_KEY                  -> PEM private key
+# - AFIP_CUIT                 -> your CUIT number (no dashes)
+# - AFIP_PTO_VTA              -> punto de venta number
 
 [vars]
 # Set to "production" when ready to issue real invoices
-AFIP_ENV = "testing"
+AFIP_ENV = "production"

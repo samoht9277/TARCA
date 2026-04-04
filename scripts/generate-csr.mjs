@@ -2,17 +2,14 @@
 /**
  * Generate a private key and CSR for ARCA (ex-AFIP) web services.
  *
- * Usage: node scripts/generate-csr.mjs <CUIT> <alias>
+ * Usage: node scripts/generate-csr.mjs <CUIT> [alias]
  * Example: node scripts/generate-csr.mjs 20123456789 tarca
  *
  * This creates:
- *   - afip_key.pem   → your private key (keep this safe!)
- *   - afip_csr.pem   → upload this to ARCA to get your certificate
- *
- * After uploading the CSR to ARCA, download the certificate and save it
- * as afip_cert.pem, then set it as a Wrangler secret.
+ *   - afip_key.pem   -> your private key (keep this safe!)
+ *   - afip_csr.pem   -> upload this to ARCA to get your certificate
  */
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { existsSync } from "fs";
 
 const cuit = process.argv[2];
@@ -21,6 +18,18 @@ const alias = process.argv[3] || "tarca";
 if (!cuit) {
   console.error("Usage: node scripts/generate-csr.mjs <CUIT> [alias]");
   console.error("Example: node scripts/generate-csr.mjs 20123456789 tarca");
+  process.exit(1);
+}
+
+// Validate CUIT is digits only (prevent injection)
+if (!/^\d{10,11}$/.test(cuit)) {
+  console.error("Error: CUIT must be 10 or 11 digits.");
+  process.exit(1);
+}
+
+// Validate alias is alphanumeric
+if (!/^[a-zA-Z0-9_-]+$/.test(alias)) {
+  console.error("Error: alias must be alphanumeric (letters, numbers, hyphens, underscores).");
   process.exit(1);
 }
 
@@ -35,26 +44,25 @@ if (existsSync(keyFile)) {
 console.log(`Generating private key and CSR for CUIT ${cuit}...\n`);
 
 // Generate RSA private key
-execSync(`openssl genrsa -out ${keyFile} 2048`, { stdio: "inherit" });
+execFileSync("openssl", ["genrsa", "-out", keyFile, "2048"], { stdio: "inherit" });
 
 // Generate CSR
 const subject = `/C=AR/O=CUIT ${cuit}/CN=${alias}/serialNumber=CUIT ${cuit}`;
-execSync(
-  `openssl req -new -key ${keyFile} -out ${csrFile} -subj "${subject}"`,
-  { stdio: "inherit" }
-);
+execFileSync("openssl", ["req", "-new", "-key", keyFile, "-out", csrFile, "-subj", subject], {
+  stdio: "inherit",
+});
 
 console.log(`
-✅ Files generated:
-   ${keyFile}  → Private key (keep this safe, never share it!)
-   ${csrFile}  → Certificate Signing Request
+Done! Files generated:
+   ${keyFile}  - Private key (keep this safe, never share it!)
+   ${csrFile}  - Certificate Signing Request
 
-📋 Next steps:
+Next steps:
    1. Go to https://auth.afip.gob.ar/contribuyente_/login.xhtml
    2. Log in with your CUIT and clave fiscal
    3. Go to "Administrador de Relaciones de Clave Fiscal"
    4. Add the "ARCA - Web Services" service if not already added
-   5. Go to "Administración de certificados digitales"
+   5. Go to "Administracion de certificados digitales"
    6. Create a new certificate, upload ${csrFile}
    7. Download the signed certificate and save it as afip_cert.pem
    8. Set up Wrangler secrets:
