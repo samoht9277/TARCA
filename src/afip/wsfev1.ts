@@ -185,6 +185,94 @@ export async function createInvoice(
   throw new Error("FECAESolicitar: failed after retry");
 }
 
+/**
+ * Create a Nota de Credito C to reverse/cancel an existing Factura C.
+ */
+export async function createCreditNote(
+  auth: AuthCredentials,
+  cuit: string,
+  ptoVta: number,
+  originalInvoice: InvoiceInfo,
+  env: "testing" | "production" = "testing",
+  date: Date = new Date()
+): Promise<InvoiceResult> {
+  const cbteTipo = 13; // Nota de Credito C
+  const fch = formatDate(date);
+  const amount = parseFloat(originalInvoice.impTotal);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, cbteTipo, env);
+    const nextNro = lastNro + 1;
+
+    const body = `${authXml(auth, cuit)}
+      <ar:FeCAEReq>
+        <ar:FeCabReq>
+          <ar:CantReg>1</ar:CantReg>
+          <ar:PtoVta>${ptoVta}</ar:PtoVta>
+          <ar:CbteTipo>${cbteTipo}</ar:CbteTipo>
+        </ar:FeCabReq>
+        <ar:FeDetReq>
+          <ar:FECAEDetRequest>
+            <ar:Concepto>2</ar:Concepto>
+            <ar:DocTipo>99</ar:DocTipo>
+            <ar:DocNro>0</ar:DocNro>
+            <ar:CbteDesde>${nextNro}</ar:CbteDesde>
+            <ar:CbteHasta>${nextNro}</ar:CbteHasta>
+            <ar:CbteFch>${fch}</ar:CbteFch>
+            <ar:ImpTotal>${amount.toFixed(2)}</ar:ImpTotal>
+            <ar:ImpTotConc>0</ar:ImpTotConc>
+            <ar:ImpNeto>${amount.toFixed(2)}</ar:ImpNeto>
+            <ar:ImpOpEx>0</ar:ImpOpEx>
+            <ar:ImpIVA>0</ar:ImpIVA>
+            <ar:ImpTrib>0</ar:ImpTrib>
+            <ar:FchServDesde>${fch}</ar:FchServDesde>
+            <ar:FchServHasta>${fch}</ar:FchServHasta>
+            <ar:FchVtoPago>${fch}</ar:FchVtoPago>
+            <ar:MonId>PES</ar:MonId>
+            <ar:MonCotiz>1</ar:MonCotiz>
+            <ar:CbtesAsoc>
+              <ar:CbteAsoc>
+                <ar:Tipo>11</ar:Tipo>
+                <ar:PtoVta>${originalInvoice.ptoVta}</ar:PtoVta>
+                <ar:Nro>${originalInvoice.cbteNro}</ar:Nro>
+                <ar:Cuit>${cuit}</ar:Cuit>
+                <ar:CbteFch>${originalInvoice.cbteFch}</ar:CbteFch>
+              </ar:CbteAsoc>
+            </ar:CbtesAsoc>
+          </ar:FECAEDetRequest>
+        </ar:FeDetReq>
+      </ar:FeCAEReq>`;
+
+    const response = await soapCall(WSFEV1_URLS[env], "FECAESolicitar", body);
+
+    const resultado = extractXml(response, "Resultado");
+    if (resultado !== "A") {
+      const errorsBlock = extractXml(response, "Errors");
+      const errMsg = (errorsBlock ? extractXml(errorsBlock, "Msg") : null)
+        || extractXml(response, "Msg")
+        || "";
+
+      if (attempt === 0 && errMsg.toLowerCase().includes("consecutiv")) {
+        continue;
+      }
+
+      console.error("FECAESolicitar (NC) full response:", response);
+      throw new Error(`Nota de Credito rejected: ${errMsg || "unknown error"}`);
+    }
+
+    const cae = extractXml(response, "CAE");
+    const caeFchVto = extractXml(response, "CAEFchVto");
+
+    if (!cae || !caeFchVto) {
+      throw new Error("Nota de Credito: missing CAE in response");
+    }
+
+    return { cae, caeFchVto, cbteNro: nextNro, ptoVta };
+  }
+
+  throw new Error("Nota de Credito: failed after retry");
+}
+
 export interface InvoiceInfo {
   cae: string;
   caeFchVto: string;
@@ -203,10 +291,9 @@ export async function queryInvoice(
   cuit: string,
   ptoVta: number,
   cbteNro: number,
-  env: "testing" | "production" = "testing"
+  env: "testing" | "production" = "testing",
+  cbteTipo: number = 11
 ): Promise<InvoiceInfo> {
-  const cbteTipo = 11; // Factura C
-
   const body = `${authXml(auth, cuit)}
       <ar:FeCompConsReq>
         <ar:CbteTipo>${cbteTipo}</ar:CbteTipo>

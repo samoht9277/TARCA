@@ -16,7 +16,7 @@ import {
   setWebhook,
 } from "./telegram";
 import { authenticate } from "./afip/wsaa";
-import { createInvoice, queryInvoice, getLastInvoiceNumber } from "./afip/wsfev1";
+import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber } from "./afip/wsfev1";
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
@@ -199,7 +199,9 @@ async function handleMessage(
         `  <code>1.500,50</code>  -  con decimales\n\n` +
         `<b>Comandos</b>\n` +
         `  /check  -  ultima factura emitida\n` +
-        `  /check 3  -  consultar factura #3`
+        `  /check 3  -  consultar factura #3\n` +
+        `  /anular 3  -  anular factura #3\n` +
+        `  /resumen  -  resumen del mes`
     );
     return;
   }
@@ -249,6 +251,154 @@ async function handleMessage(
     } catch (error) {
       console.error("Check failed:", error);
       await sendMessage(token, chatId, "Error al consultar factura.");
+    }
+    return;
+  }
+
+  // Handle /anular command - create credit note to reverse an invoice
+  if (text.startsWith("/anular")) {
+    const parts = text.split(/\s+/);
+    const cbteNro = parts[1] ? parseInt(parts[1], 10) : 0;
+
+    if (!cbteNro || isNaN(cbteNro) || cbteNro <= 0) {
+      await sendMessage(token, chatId, "Uso: <code>/anular 3</code> (numero de factura)");
+      return;
+    }
+
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, cbteNro, afipEnv);
+
+      if (!info.cae || info.resultado !== "A") {
+        await sendMessage(token, chatId, `Factura #${cbteNro} no encontrada o no esta aprobada.`);
+        return;
+      }
+
+      const importe = formatCurrency(parseFloat(info.impTotal));
+      const fchEmision = info.cbteFch ? formatDateAR(parseDateYMD(info.cbteFch)) : "-";
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: "Anular", callback_data: `anular:${cbteNro}` },
+            { text: "Cancelar", callback_data: "cancel" },
+          ],
+        ],
+      };
+
+      await sendMessage(
+        token,
+        chatId,
+        `<b>Anular Factura C  ${formatCbteNro(ptoVta, cbteNro)}</b>\n\n` +
+          `Monto  <b>${importe}</b>\n` +
+          `Fecha  ${fchEmision}\n\n` +
+          `Se emitira una <b>Nota de Credito C</b> por el mismo monto.`,
+        keyboard
+      );
+    } catch (error) {
+      console.error("Anular lookup failed:", error);
+      await sendMessage(token, chatId, "Error al consultar factura.");
+    }
+    return;
+  }
+
+  // Handle /resumen command - monthly summary
+  if (text.startsWith("/resumen")) {
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const today = nowAR();
+      const currentMonth = today.getMonth();
+      const currentYear = today.getFullYear();
+      const monthName = today.toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+
+      // Get last invoice number for Factura C
+      const lastFactura = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
+
+      if (lastFactura === 0) {
+        await sendMessage(token, chatId, "No hay facturas emitidas.");
+        return;
+      }
+
+      // Iterate backwards through invoices, collecting current month ones
+      let totalFacturas = 0;
+      let sumFacturas = 0;
+      const invoices: { nro: number; amount: number; date: string }[] = [];
+
+      for (let i = lastFactura; i >= 1; i--) {
+        const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, i, afipEnv);
+        if (!info.cbteFch) continue;
+
+        const invDate = parseDateYMD(info.cbteFch);
+        if (invDate.getFullYear() !== currentYear || invDate.getMonth() !== currentMonth) {
+          break; // Past invoices are in order, so we can stop
+        }
+
+        if (info.resultado === "A") {
+          const amount = parseFloat(info.impTotal);
+          totalFacturas++;
+          sumFacturas += amount;
+          invoices.push({ nro: i, amount, date: formatDateAR(invDate) });
+        }
+      }
+
+      // Check credit notes (Nota de Credito C = 13)
+      const lastNC = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 13, afipEnv);
+      let totalNC = 0;
+      let sumNC = 0;
+
+      for (let i = lastNC; i >= 1; i--) {
+        const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, i, afipEnv, 13);
+        if (!info.cbteFch) continue;
+
+        const invDate = parseDateYMD(info.cbteFch);
+        if (invDate.getFullYear() !== currentYear || invDate.getMonth() !== currentMonth) {
+          break;
+        }
+
+        if (info.resultado === "A") {
+          totalNC++;
+          sumNC += parseFloat(info.impTotal);
+        }
+      }
+
+      const neto = sumFacturas - sumNC;
+
+      // Build summary message
+      let msg = `<b>Resumen  ${monthName}</b>\n\n`;
+
+      if (invoices.length === 0 && totalNC === 0) {
+        msg += "No hay comprobantes emitidos este mes.";
+      } else {
+        if (invoices.length > 0) {
+          msg += `<b>Facturas</b>\n`;
+          for (const inv of invoices.reverse()) {
+            msg += `  #${inv.nro}  ${formatCurrency(inv.amount)}  ${inv.date}\n`;
+          }
+          msg += `\n`;
+        }
+
+        if (totalNC > 0) {
+          msg += `Notas de credito: ${totalNC} por ${formatCurrency(sumNC)}\n\n`;
+        }
+
+        msg += `Facturado  <b>${formatCurrency(sumFacturas)}</b>`;
+        if (totalNC > 0) {
+          msg += `\nAnulado  ${formatCurrency(sumNC)}`;
+          msg += `\n<b>Neto  ${formatCurrency(neto)}</b>`;
+        }
+        msg += `\n${totalFacturas} factura${totalFacturas !== 1 ? "s" : ""}`;
+      }
+
+      await sendMessage(token, chatId, msg);
+    } catch (error) {
+      console.error("Resumen failed:", error);
+      await sendMessage(token, chatId, "Error al generar resumen.");
     }
     return;
   }
@@ -319,6 +469,63 @@ async function handleCallbackQuery(
 
   if (query.data === "cancel") {
     await editMessageText(token, chatId, messageId, "Cancelado.");
+    return;
+  }
+
+  if (query.data.startsWith("anular:")) {
+    const cbteNro = parseInt(query.data.split(":")[1], 10);
+    if (isNaN(cbteNro) || cbteNro <= 0) {
+      await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
+      return;
+    }
+
+    await editMessageText(token, chatId, messageId, "Procesando nota de credito...");
+
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const original = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, cbteNro, afipEnv);
+      if (!original.cae || original.resultado !== "A") {
+        await editMessageText(token, chatId, messageId, "Factura no encontrada o no aprobada.");
+        return;
+      }
+
+      const result = await createCreditNote(
+        auth,
+        env.AFIP_CUIT,
+        ptoVta,
+        original,
+        afipEnv,
+        nowAR()
+      );
+
+      const importe = formatCurrency(parseFloat(original.impTotal));
+      const fchVto = result.caeFchVto
+        ? formatDateAR(parseDateYMD(result.caeFchVto))
+        : result.caeFchVto;
+
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        `<b>Nota de Credito C  ${formatCbteNro(result.ptoVta, result.cbteNro)}</b>\n` +
+          `Aprobada por ARCA\n\n` +
+          `Anula Factura C #${cbteNro}\n` +
+          `Monto  <b>${importe}</b>\n\n` +
+          `CAE  <code>${result.cae}</code>\n` +
+          `Vencimiento  ${fchVto}`
+      );
+    } catch (error) {
+      console.error("Credit note failed:", error);
+      await editMessageText(
+        token,
+        chatId,
+        messageId,
+        "Error al crear nota de credito. Revisa los logs."
+      );
+    }
     return;
   }
 
