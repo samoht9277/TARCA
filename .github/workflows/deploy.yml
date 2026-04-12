@@ -35,11 +35,8 @@ jobs:
           printf '%s' "${{ vars.AFIP_CUIT }}" | npx wrangler secret put AFIP_CUIT
           printf '%s' "${{ vars.AFIP_PTO_VTA }}" | npx wrangler secret put AFIP_PTO_VTA
 
-      - name: Set AFIP_ENV
-        run: sed -i 's/AFIP_ENV = "testing"/AFIP_ENV = "${{ vars.AFIP_ENV || 'testing' }}"/' wrangler.toml
-
       - name: Deploy
-        run: npx wrangler deploy
+        run: npx wrangler deploy --var AFIP_ENV:${{ vars.AFIP_ENV || 'testing' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
