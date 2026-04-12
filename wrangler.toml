@@ -13,6 +13,4 @@ compatibility_flags = ["nodejs_compat"]
 # - AFIP_CUIT                 -> your CUIT number (no dashes)
 # - AFIP_PTO_VTA              -> punto de venta number
 
-[vars]
-# Set to "production" when ready to issue real invoices
-AFIP_ENV = "testing"
+# AFIP_ENV is set as a secret via CI (defaults to "testing" if unset)
