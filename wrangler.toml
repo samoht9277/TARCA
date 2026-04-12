@@ -13,4 +13,5 @@ compatibility_flags = ["nodejs_compat"]
 # - AFIP_CUIT                 -> your CUIT number (no dashes)
 # - AFIP_PTO_VTA              -> punto de venta number
 
-# AFIP_ENV is set as a secret via CI (defaults to "testing" if unset)
+[vars]
+AFIP_ENV = "testing"
