@@ -23,6 +23,16 @@ function formatDate(date: Date): string {
   return `${y}${m}${d}`;
 }
 
+/** Escape special XML characters to prevent injection in SOAP payloads. */
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function buildSoap(action: string, body: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ar="http://ar.gov.afip.dif.FEV1/">
@@ -36,9 +46,9 @@ function buildSoap(action: string, body: string): string {
 
 function authXml(auth: AuthCredentials, cuit: string): string {
   return `<ar:Auth>
-        <ar:Token>${auth.token}</ar:Token>
-        <ar:Sign>${auth.sign}</ar:Sign>
-        <ar:Cuit>${cuit}</ar:Cuit>
+        <ar:Token>${escapeXml(auth.token)}</ar:Token>
+        <ar:Sign>${escapeXml(auth.sign)}</ar:Sign>
+        <ar:Cuit>${escapeXml(cuit)}</ar:Cuit>
       </ar:Auth>`;
 }
 
@@ -177,7 +187,7 @@ export async function createInvoice(
         continue;
       }
 
-      console.error("FECAESolicitar full response:", response);
+
       throw new Error(`FECAESolicitar rejected: ${errMsg || "unknown error"}`);
     }
 
@@ -270,7 +280,7 @@ export async function createCreditNote(
         continue;
       }
 
-      console.error("FECAESolicitar (NC) full response:", response);
+
       throw new Error(`Nota de Credito rejected: ${errMsg || "unknown error"}`);
     }
 
