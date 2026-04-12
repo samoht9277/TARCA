@@ -81,7 +81,7 @@ interface PendingInput {
 const pendingInputs = new Map<number, PendingInput>();
 
 function getAfipEnv(env: Env): "testing" | "production" {
-  return env.AFIP_ENV === "production" ? "production" : "testing";
+  return env.AFIP_ENV?.trim() === "production" ? "production" : "testing";
 }
 
 function nowAR(): Date {
