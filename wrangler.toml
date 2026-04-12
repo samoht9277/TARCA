@@ -12,6 +12,7 @@ compatibility_flags = ["nodejs_compat"]
 # - AFIP_KEY                  -> PEM private key
 # - AFIP_CUIT                 -> your CUIT number (no dashes)
 # - AFIP_PTO_VTA              -> punto de venta number
+# - CALLBACK_SECRET           -> random string for HMAC signing callback data
 
 [vars]
 AFIP_ENV = "testing"
