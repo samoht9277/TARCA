@@ -15,4 +15,4 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # Set to "production" when ready to issue real invoices
-AFIP_ENV = "testing"
+AFIP_ENV = "production"
