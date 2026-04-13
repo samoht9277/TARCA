@@ -118,13 +118,14 @@ curl -X POST -H "X-Setup-Secret: <YOUR_SETUP_SECRET>" "https://tarca.<your-subdo
 
 ### 9. Switch to production
 
-By default the bot runs against ARCA's testing environment (homologacion). To issue real invoices, edit `wrangler.toml`:
+By default the bot runs against ARCA's testing environment (homologacion). To issue real invoices:
 
-```toml
-AFIP_ENV = "production"
+**With CI (recommended):** Set the `AFIP_ENV` GitHub Variable to `production` in your repo Settings > Secrets and variables > Actions > Variables. The next deploy will pick it up.
+
+**Manual deploy:** Pass it as a var flag:
+```bash
+npx wrangler deploy --var AFIP_ENV:production
 ```
-
-Then redeploy with `make deploy`.
 
 **Note:** For testing (homo), you need a separate certificate from WSASS (ARCA's homologation cert service). Your production certificate won't work against the testing endpoints.
 
