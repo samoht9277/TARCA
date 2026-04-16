@@ -35,6 +35,17 @@ const MAX_AMOUNT = 10_000_000;
 const AR_TZ_OFFSET = -3 * 60 * 60 * 1000;
 const MAX_RESUMEN_INVOICES = 100;
 
+const AMOUNT_EXAMPLES = `<pre>15000\n15000 28/03\n1.500,50</pre>`;
+
+const COMMANDS_HELP =
+  `<b>Comandos</b>\n` +
+  `  /check - ultima factura\n` +
+  `  /check 3 - consultar factura #3\n` +
+  `  /anular 3 - anular factura #3\n` +
+  `  /resumen - resumen del mes\n` +
+  `  /resumen 03/2026 - resumen de marzo\n` +
+  `  /status - estado del bot`;
+
 /** HMAC-sign a callback_data payload so it can't be tampered with. */
 async function signCallback(data: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -291,18 +302,8 @@ async function handleMessage(
       `<b>TARCA</b>${envTag}\n` +
         `Facturacion electronica por Telegram\n\n` +
         `Enviame un monto y te pregunto el resto:\n` +
-        `<pre>` +
-        `15000\n` +
-        `15000 28/03\n` +
-        `1.500,50` +
-        `</pre>` +
-        `<b>Comandos</b>\n` +
-        `  /check - ultima factura\n` +
-        `  /check 3 - consultar factura #3\n` +
-        `  /anular 3 - anular factura #3\n` +
-        `  /resumen - resumen del mes\n` +
-        `  /resumen 03/2026 - resumen de marzo\n` +
-        `  /status - estado del bot`
+        AMOUNT_EXAMPLES +
+        COMMANDS_HELP
     );
     return;
   }
@@ -691,17 +692,8 @@ async function handleMessage(
       token,
       chatId,
       `No entendi. Enviame un monto para facturar:\n` +
-        `<pre>` +
-        `15000\n` +
-        `15000 28/03\n` +
-        `1.500,50` +
-        `</pre>` +
-        `<b>Comandos</b>\n` +
-        `  /check - ultima factura\n` +
-        `  /anular 3 - anular factura #3\n` +
-        `  /resumen - resumen del mes\n` +
-        `  /resumen 03/2026 - otro mes\n` +
-        `  /status - estado del bot`
+        AMOUNT_EXAMPLES +
+        COMMANDS_HELP
     );
     return;
   }
@@ -929,9 +921,6 @@ async function handleCallbackQuery(
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
-
-    // Encode state in callback_data for CUIT/DNI buttons instead of using memory
-    const ctx = `${amount}:${dateStr}:${concepto}:${description}`;
 
     await editMessageText(
       token,
