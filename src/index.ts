@@ -28,27 +28,77 @@ export interface Env {
   AFIP_PTO_VTA: string;
   AFIP_ENV: string;
   SETUP_SECRET: string;
+  CALLBACK_SECRET: string;
 }
 
 const MAX_AMOUNT = 10_000_000;
 const AR_TZ_OFFSET = -3 * 60 * 60 * 1000;
+const MAX_RESUMEN_INVOICES = 100;
 
-/** Constant-time string comparison to prevent timing attacks on secrets. */
+/** HMAC-sign a callback_data payload so it can't be tampered with. */
+async function signCallback(data: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  const hex = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 12);
+  return `${data}|${hex}`;
+}
+
+/** Verify an HMAC-signed callback_data. Returns the data without signature, or null if invalid. */
+async function verifyCallback(signed: string, secret: string): Promise<string | null> {
+  const idx = signed.lastIndexOf("|");
+  if (idx === -1) return null;
+  const data = signed.slice(0, idx);
+  const expected = await signCallback(data, secret);
+  // Use the full signed string for comparison (includes the signature)
+  const encoder = new TextEncoder();
+  const a = encoder.encode(expected);
+  const b = encoder.encode(signed);
+  if (a.length !== b.length) return null;
+  try {
+    if (crypto.subtle.timingSafeEqual(a, b)) return data;
+  } catch { /* length mismatch throws */ }
+  return null;
+}
+
+/** Timing-safe string comparison using native Web Crypto. */
 function timingSafeEqual(a: string, b: string): boolean {
   const encoder = new TextEncoder();
   const bufA = encoder.encode(a);
   const bufB = encoder.encode(b);
-  if (bufA.length !== bufB.length) {
-    const dummy = new Uint8Array(bufA.length);
-    let r = 1;
-    for (let i = 0; i < bufA.length; i++) r |= bufA[i] ^ dummy[i];
-    return false;
+  try {
+    return crypto.subtle.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false; // length mismatch
   }
-  let result = 0;
-  for (let i = 0; i < bufA.length; i++) {
-    result |= bufA[i] ^ bufB[i];
+}
+
+/** Track in-flight invoice creations to prevent double-tap. */
+const inflightInvoices = new Set<number>(); // chatId
+
+type InlineButton = { text: string; callback_data: string };
+type InlineKeyboard = InlineButton[][];
+
+/** Sign all callback_data values in an inline keyboard. */
+async function signKeyboard(keyboard: InlineKeyboard, secret: string): Promise<InlineKeyboard> {
+  const signed: InlineKeyboard = [];
+  for (const row of keyboard) {
+    const signedRow: InlineButton[] = [];
+    for (const btn of row) {
+      if (btn.callback_data === "cancel") {
+        signedRow.push(btn);
+      } else {
+        signedRow.push({ ...btn, callback_data: await signCallback(btn.callback_data, secret) });
+      }
+    }
+    signed.push(signedRow);
   }
-  return result === 0;
+  return signed;
 }
 
 function friendlyError(error: unknown): string {
@@ -373,12 +423,12 @@ async function handleMessage(
       const fchEmision = info.cbteFch ? formatDateAR(parseDateYMD(info.cbteFch)) : "-";
 
       const keyboard = {
-        inline_keyboard: [
+        inline_keyboard: await signKeyboard([
           [
             { text: "Anular", callback_data: `anular:${cbteNro}` },
             { text: "Cancelar", callback_data: "cancel" },
           ],
-        ],
+        ], env.CALLBACK_SECRET),
       };
 
       await sendMessage(
@@ -439,7 +489,9 @@ async function handleMessage(
       let sumFacturas = 0;
       const invoices: { nro: number; amount: number; date: string }[] = [];
 
-      for (let i = lastFactura; i >= 1; i--) {
+      let queriedFacturas = 0;
+      for (let i = lastFactura; i >= 1 && queriedFacturas < MAX_RESUMEN_INVOICES; i--) {
+        queriedFacturas++;
         const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, i, afipEnv);
         if (!info.cbteFch) continue;
 
@@ -465,7 +517,9 @@ async function handleMessage(
       let totalNC = 0;
       let sumNC = 0;
 
-      for (let i = lastNC; i >= 1; i--) {
+      let queriedNC = 0;
+      for (let i = lastNC; i >= 1 && queriedNC < MAX_RESUMEN_INVOICES; i--) {
+        queriedNC++;
         const info = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, i, afipEnv, 13);
         if (!info.cbteFch) continue;
 
@@ -518,16 +572,21 @@ async function handleMessage(
     return;
   }
 
-  // Check if we're waiting for user input (description or receptor)
+  // Check if we're waiting for user input (description or receptor).
+  // Atomically claim the pending state by checking delete()'s return value,
+  // so two concurrent messages for the same chat can't both process the same state.
   const pending = pendingInputs.get(chatId);
   if (pending && !text.startsWith("/")) {
+    if (!pendingInputs.delete(chatId)) {
+      // Another concurrent request already claimed and processed this pending state.
+      return;
+    }
+
     if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
-      pendingInputs.delete(chatId);
       await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
       return;
     }
 
-    pendingInputs.delete(chatId);
     const datePayload = formatDateYMD(pending.date);
     const afipEnv = getAfipEnv(env);
     const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
@@ -556,7 +615,7 @@ async function handleMessage(
 
       // Show full confirmation view with all options
       const confirmKeyboard = {
-        inline_keyboard: [
+        inline_keyboard: await signKeyboard([
           [
             { text: "CONFIRMAR", callback_data: callbackData },
           ],
@@ -567,7 +626,7 @@ async function handleMessage(
           [
             { text: "Cancelar", callback_data: "cancel" },
           ],
-        ],
+        ], env.CALLBACK_SECRET),
       };
 
       await sendMessage(
@@ -595,7 +654,7 @@ async function handleMessage(
 
     // Full confirmation view
     const confirmKeyboard = {
-      inline_keyboard: [
+      inline_keyboard: await signKeyboard([
         [
           { text: "CONFIRMAR", callback_data: callbackData },
         ],
@@ -606,7 +665,7 @@ async function handleMessage(
         [
           { text: "Cancelar", callback_data: "cancel" },
         ],
-      ],
+      ], env.CALLBACK_SECRET),
     };
 
     await sendMessage(
@@ -658,13 +717,13 @@ async function handleMessage(
 
   // Step 1: Ask servicio or venta
   const typeKeyboard = {
-    inline_keyboard: [
+    inline_keyboard: await signKeyboard([
       [
         { text: "Servicio", callback_data: `tipo:s:${amount}:${datePayload}` },
         { text: "Venta", callback_data: `tipo:v:${amount}:${datePayload}` },
         { text: "Cancelar", callback_data: "cancel" },
       ],
-    ],
+    ], env.CALLBACK_SECRET),
   };
 
   await sendMessage(
@@ -705,8 +764,15 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (query.data.startsWith("tipo:")) {
-    const parts = query.data.split(":");
+  // Verify HMAC signature on all non-cancel callbacks
+  const data = await verifyCallback(query.data, env.CALLBACK_SECRET);
+  if (data === null) {
+    await editMessageText(token, chatId, messageId, "Error: datos invalidos o expirados.");
+    return;
+  }
+
+  if (data.startsWith("tipo:")) {
+    const parts = data.split(":");
     const tipo = parts[1]; // "s" or "v"
     const amount = parseFloat(parts[2]);
     const dateStr = parts[3];
@@ -722,7 +788,7 @@ async function handleCallbackQuery(
     if (tipo === "s") {
       // Service: show default name, offer to change or identify receptor
       const serviceKeyboard = {
-        inline_keyboard: [
+        inline_keyboard: await signKeyboard([
           [
             { text: "CONFIRMAR", callback_data: `confirm:${amount}:${dateStr}` },
           ],
@@ -733,7 +799,7 @@ async function handleCallbackQuery(
           [
             { text: "Cancelar", callback_data: "cancel" },
           ],
-        ],
+        ], env.CALLBACK_SECRET),
       };
 
       await editMessageText(
@@ -796,8 +862,8 @@ async function handleCallbackQuery(
   }
 
   // Review: show full confirmation view without creating (used by "Quitar receptor" etc)
-  if (query.data.startsWith("review:")) {
-    const parts = query.data.split(":");
+  if (data.startsWith("review:")) {
+    const parts = data.split(":");
     const amount = parseFloat(parts[1]);
     const dateStr = parts[2];
     const concepto = parseInt(parts[3], 10) as Concepto;
@@ -819,7 +885,7 @@ async function handleCallbackQuery(
       : `confirm:${amount}:${dateStr}`;
 
     const confirmKeyboard = {
-      inline_keyboard: [
+      inline_keyboard: await signKeyboard([
         [
           { text: "CONFIRMAR", callback_data: callbackData },
         ],
@@ -830,7 +896,7 @@ async function handleCallbackQuery(
         [
           { text: "Cancelar", callback_data: "cancel" },
         ],
-      ],
+      ], env.CALLBACK_SECRET),
     };
 
     const afipEnv = getAfipEnv(env);
@@ -852,8 +918,8 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (query.data.startsWith("recep:")) {
-    const parts = query.data.split(":");
+  if (data.startsWith("recep:")) {
+    const parts = data.split(":");
     const amount = parseFloat(parts[1]);
     const dateStr = parts[2];
     const concepto = parseInt(parts[3], 10) as Concepto;
@@ -886,9 +952,9 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (query.data.startsWith("venta:")) {
+  if (data.startsWith("venta:")) {
     // Format: venta:amount:date:desc or venta:amount:date:desc:docTipo:docNro
-    const parts = query.data.split(":");
+    const parts = data.split(":");
     const amount = parseFloat(parts[1]);
     const dateStr = parts[2];
     const description = parts[3] || "Producto";
@@ -899,6 +965,12 @@ async function handleCallbackQuery(
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
+
+    if (inflightInvoices.has(chatId)) {
+      await editMessageText(token, chatId, messageId, "Ya hay una factura en proceso. Espera.");
+      return;
+    }
+    inflightInvoices.add(chatId);
 
     const date = parseDateYMD(dateStr);
     const receiver: ReceiverDoc = { docTipo, docNro };
@@ -948,16 +1020,24 @@ async function handleCallbackQuery(
     } catch (error) {
       console.error("Product invoice failed:", error);
       await editMessageText(token, chatId, messageId, friendlyError(error));
+    } finally {
+      inflightInvoices.delete(chatId);
     }
     return;
   }
 
-  if (query.data.startsWith("anular:")) {
-    const cbteNro = parseInt(query.data.split(":")[1], 10);
+  if (data.startsWith("anular:")) {
+    const cbteNro = parseInt(data.split(":")[1], 10);
     if (isNaN(cbteNro) || cbteNro <= 0) {
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
+
+    if (inflightInvoices.has(chatId)) {
+      await editMessageText(token, chatId, messageId, "Ya hay una operacion en proceso. Espera.");
+      return;
+    }
+    inflightInvoices.add(chatId);
 
     await editMessageText(token, chatId, messageId, "Procesando nota de credito...");
 
@@ -1007,12 +1087,14 @@ async function handleCallbackQuery(
         messageId,
         "Error al crear nota de credito. Revisa los logs."
       );
+    } finally {
+      inflightInvoices.delete(chatId);
     }
     return;
   }
 
-  if (query.data.startsWith("confirm:")) {
-    const parts = query.data.split(":");
+  if (data.startsWith("confirm:")) {
+    const parts = data.split(":");
     const amount = parseFloat(parts[1]);
     const dateStr = parts[2]; // YYYYMMDD
     // Optional: parts[3]=docTipo, parts[4]=docNro
@@ -1023,6 +1105,12 @@ async function handleCallbackQuery(
       await editMessageText(token, chatId, messageId, "Error: datos invalidos.");
       return;
     }
+
+    if (inflightInvoices.has(chatId)) {
+      await editMessageText(token, chatId, messageId, "Ya hay una factura en proceso. Espera.");
+      return;
+    }
+    inflightInvoices.add(chatId);
 
     const date = parseDateYMD(dateStr);
     const receiver: ReceiverDoc = { docTipo, docNro };
@@ -1078,6 +1166,8 @@ async function handleCallbackQuery(
     } catch (error) {
       console.error("Invoice creation failed:", error);
       await editMessageText(token, chatId, messageId, friendlyError(error));
+    } finally {
+      inflightInvoices.delete(chatId);
     }
   }
 }
