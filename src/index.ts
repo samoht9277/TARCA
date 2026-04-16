@@ -572,16 +572,21 @@ async function handleMessage(
     return;
   }
 
-  // Check if we're waiting for user input (description or receptor)
+  // Check if we're waiting for user input (description or receptor).
+  // Atomically claim the pending state by checking delete()'s return value,
+  // so two concurrent messages for the same chat can't both process the same state.
   const pending = pendingInputs.get(chatId);
   if (pending && !text.startsWith("/")) {
+    if (!pendingInputs.delete(chatId)) {
+      // Another concurrent request already claimed and processed this pending state.
+      return;
+    }
+
     if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
-      pendingInputs.delete(chatId);
       await sendMessage(token, chatId, "Se vencio el tiempo. Enviame el monto de nuevo.");
       return;
     }
 
-    pendingInputs.delete(chatId);
     const datePayload = formatDateYMD(pending.date);
     const afipEnv = getAfipEnv(env);
     const envLabel = afipEnv === "testing" ? "\n<i>[TESTING]</i>" : "";
