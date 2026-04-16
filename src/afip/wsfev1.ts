@@ -224,6 +224,17 @@ export async function createCreditNote(
   const fch = formatDate(date);
   const amount = parseFloat(originalInvoice.impTotal);
 
+  // Inherit Concepto and receiver from the original invoice so the credit note
+  // mirrors it. Service date fields only included for Servicios (Concepto = 2).
+  const concepto = originalInvoice.concepto;
+  const docTipo = originalInvoice.docTipo;
+  const docNro = originalInvoice.docNro;
+  const serviceDates = concepto === 2
+    ? `<ar:FchServDesde>${fch}</ar:FchServDesde>
+            <ar:FchServHasta>${fch}</ar:FchServHasta>
+            <ar:FchVtoPago>${fch}</ar:FchVtoPago>`
+    : "";
+
   for (let attempt = 0; attempt < 2; attempt++) {
     const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, cbteTipo, env);
     const nextNro = lastNro + 1;
@@ -237,9 +248,9 @@ export async function createCreditNote(
         </ar:FeCabReq>
         <ar:FeDetReq>
           <ar:FECAEDetRequest>
-            <ar:Concepto>2</ar:Concepto>
-            <ar:DocTipo>99</ar:DocTipo>
-            <ar:DocNro>0</ar:DocNro>
+            <ar:Concepto>${concepto}</ar:Concepto>
+            <ar:DocTipo>${docTipo}</ar:DocTipo>
+            <ar:DocNro>${docNro}</ar:DocNro>
             <ar:CbteDesde>${nextNro}</ar:CbteDesde>
             <ar:CbteHasta>${nextNro}</ar:CbteHasta>
             <ar:CbteFch>${fch}</ar:CbteFch>
@@ -249,9 +260,7 @@ export async function createCreditNote(
             <ar:ImpOpEx>0</ar:ImpOpEx>
             <ar:ImpIVA>0</ar:ImpIVA>
             <ar:ImpTrib>0</ar:ImpTrib>
-            <ar:FchServDesde>${fch}</ar:FchServDesde>
-            <ar:FchServHasta>${fch}</ar:FchServHasta>
-            <ar:FchVtoPago>${fch}</ar:FchVtoPago>
+            ${serviceDates}
             <ar:MonId>PES</ar:MonId>
             <ar:MonCotiz>1</ar:MonCotiz>
             <ar:CbtesAsoc>
@@ -305,6 +314,9 @@ export interface InvoiceInfo {
   cbteFch: string;
   impTotal: string;
   resultado: string;
+  concepto: Concepto;
+  docTipo: number;
+  docNro: number;
 }
 
 /**
@@ -338,6 +350,10 @@ export async function queryInvoice(
   const cbteFch = extractXml(response, "CbteFch") || "";
   const impTotal = extractXml(response, "ImpTotal") || "";
   const resultado = extractXml(response, "Resultado") || "";
+  const conceptoRaw = parseInt(extractXml(response, "Concepto") || "2", 10);
+  const concepto: Concepto = conceptoRaw === 1 ? 1 : 2;
+  const docTipo = parseInt(extractXml(response, "DocTipo") || "99", 10);
+  const docNro = parseInt(extractXml(response, "DocNro") || "0", 10);
 
-  return { cae, caeFchVto, cbteNro, ptoVta, cbteFch, impTotal, resultado };
+  return { cae, caeFchVto, cbteNro, ptoVta, cbteFch, impTotal, resultado, concepto, docTipo, docNro };
 }
