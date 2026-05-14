@@ -526,17 +526,15 @@ async function handleMessage(
       const current = findCategory(grandTotal);
       const next = current ? nextCategory(current) : null;
 
+      const wsCount = String(annual.count).padStart(2, "0");
       let msg = `<b>Recategorizacion Monotributo</b>\n\n`;
       msg += `<pre>`;
+      msg += `Facturado WS    ${formatCurrency(annual.total)} (${wsCount} inv)\n`;
       if (offset.amount > 0) {
-        msg += `Facturado WS    ${formatCurrency(annual.total)}\n`;
-        msg += `Manual hist.    ${formatCurrency(offset.amount)} (${offset.count} inv)\n`;
-        msg += `Total (12m)     ${formatCurrency(grandTotal)}\n`;
-      } else {
-        msg += `Facturado (12m) ${formatCurrency(grandTotal)}\n`;
+        const uiCount = String(offset.count).padStart(2, "0");
+        msg += `Facturado UI    ${formatCurrency(offset.amount)} (${uiCount} inv)\n`;
+        msg += `Total 12mon     ${formatCurrency(grandTotal)}\n`;
       }
-      msg += `Facturas WS     ${annual.count}\n`;
-      msg += `Ptos de venta   ${annual.puntosQueried}\n`;
       msg += `Periodo         ${annual.fromLabel} - ${annual.toLabel}\n`;
 
       if (current) {
@@ -547,12 +545,24 @@ async function handleMessage(
 
         if (next) {
           const remaining = current.maxAnnualIncome - grandTotal;
-          msg += `\nMargen          ${formatCurrency(remaining)}`;
+          msg += `\nRestante        ${formatCurrency(remaining)}`;
         }
       } else {
         const maxCat = CATEGORIES[CATEGORIES.length - 1];
         msg += `\nExcede cat. ${maxCat.name} (${formatCurrency(maxCat.maxAnnualIncome)})`;
       }
+
+      // Next recategorization (ARCA recat windows close ~Jan 20 / Jul 20)
+      const today = nowAR();
+      const year = today.getFullYear();
+      const candidates = [
+        new Date(year, 0, 20),
+        new Date(year, 6, 20),
+        new Date(year + 1, 0, 20),
+      ];
+      const nextRecat = candidates.find((d) => d > today) ?? candidates[candidates.length - 1];
+      const daysUntil = Math.ceil((nextRecat.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+      msg += `\n\nProx Recat.     ${formatDateAR(nextRecat)} (en ${daysUntil} dias)`;
 
       msg += `</pre>`;
 
