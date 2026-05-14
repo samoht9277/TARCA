@@ -17,6 +17,7 @@ import {
 } from "./telegram";
 import { authenticate } from "./afip/wsaa";
 import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, type Concepto, type ReceiverDoc } from "./afip/wsfev1";
+import { CATEGORIES, CATEGORIES_EFFECTIVE_DATE, findCategory, nextCategory } from "./monotributo";
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
@@ -44,6 +45,7 @@ const COMMANDS_HELP =
   `  /anular 3 - anular factura #3\n` +
   `  /resumen - resumen del mes\n` +
   `  /resumen 03/2026 - resumen de marzo\n` +
+  `  /recat - categoria monotributo\n` +
   `  /status - estado del bot`;
 
 /** HMAC-sign a callback_data payload so it can't be tampered with. */
@@ -272,6 +274,61 @@ export function formatDateAR(date: Date): string {
   });
 }
 
+interface AnnualTotal {
+  total: number;
+  count: number;
+  fromLabel: string;
+  toLabel: string;
+}
+
+async function getLast12MonthsTotal(
+  auth: import("./afip/wsaa").AuthCredentials,
+  cuit: string,
+  ptoVta: number,
+  afipEnv: "testing" | "production"
+): Promise<AnnualTotal> {
+  const today = nowAR();
+  const twelveMonthsAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
+  const cutoff = formatDateYMD(twelveMonthsAgo);
+
+  const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, 11, afipEnv);
+
+  let total = 0;
+  let count = 0;
+  let queried = 0;
+
+  for (let i = lastNro; i >= 1 && queried < MAX_RESUMEN_INVOICES; i--) {
+    queried++;
+    const info = await queryInvoice(auth, cuit, ptoVta, i, afipEnv);
+    if (!info.cbteFch) continue;
+
+    if (info.cbteFch < cutoff) break;
+
+    if (info.resultado === "A") {
+      total += parseFloat(info.impTotal);
+      count++;
+    }
+  }
+
+  // Subtract credit notes
+  const lastNC = await getLastInvoiceNumber(auth, cuit, ptoVta, 13, afipEnv);
+  let ncQueried = 0;
+  for (let i = lastNC; i >= 1 && ncQueried < MAX_RESUMEN_INVOICES; i--) {
+    ncQueried++;
+    const info = await queryInvoice(auth, cuit, ptoVta, i, afipEnv, 13);
+    if (!info.cbteFch) continue;
+    if (info.cbteFch < cutoff) break;
+    if (info.resultado === "A") {
+      total -= parseFloat(info.impTotal);
+    }
+  }
+
+  const fromLabel = formatDateAR(twelveMonthsAgo);
+  const toLabel = formatDateAR(today);
+
+  return { total: Math.max(0, total), count, fromLabel, toLabel };
+}
+
 async function handleMessage(
   update: TelegramUpdate,
   env: Env
@@ -387,6 +444,62 @@ async function handleMessage(
     } catch (error) {
       console.error("Status failed:", error);
       await sendMessage(token, chatId, "Error al consultar estado.");
+    }
+    return;
+  }
+
+  // Handle /recat command - check monotributo category based on last 12 months
+  if (text.startsWith("/recat")) {
+    try {
+      const afipEnv = getAfipEnv(env);
+      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+
+      const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, ptoVta, afipEnv);
+
+      const current = findCategory(annual.total);
+      const next = current ? nextCategory(current) : null;
+
+      let msg = `<b>Recategorizacion Monotributo</b>\n\n`;
+      msg += `<pre>`;
+      msg += `Facturado (12m) ${formatCurrency(annual.total)}\n`;
+      msg += `Facturas        ${annual.count}\n`;
+      msg += `Periodo         ${annual.fromLabel} - ${annual.toLabel}\n`;
+
+      if (current) {
+        const pct = Math.round((annual.total / current.maxAnnualIncome) * 100);
+        msg += `\nCategoria       ${current.name}\n`;
+        msg += `Tope            ${formatCurrency(current.maxAnnualIncome)}\n`;
+        msg += `Uso             ${pct}%`;
+
+        if (next) {
+          const remaining = current.maxAnnualIncome - annual.total;
+          msg += `\nMargen          ${formatCurrency(remaining)}`;
+        }
+      } else {
+        const maxCat = CATEGORIES[CATEGORIES.length - 1];
+        msg += `\nExcede cat. ${maxCat.name} (${formatCurrency(maxCat.maxAnnualIncome)})`;
+      }
+
+      msg += `</pre>`;
+
+      if (current) {
+        const pct = (annual.total / current.maxAnnualIncome) * 100;
+        if (pct >= 90) {
+          msg += `\n⚠️ Estas al ${Math.round(pct)}% del tope. Considera recategorizarte.`;
+        } else if (pct >= 75) {
+          msg += `\nAtento: al ${Math.round(pct)}% del tope.`;
+        }
+      } else {
+        msg += `\n🚨 Superaste el tope maximo de Monotributo.`;
+      }
+
+      msg += `\n\n<i>Categorias vigentes desde ${CATEGORIES_EFFECTIVE_DATE}</i>`;
+
+      await sendMessage(token, chatId, msg);
+    } catch (error) {
+      console.error("Recat failed:", error);
+      await sendMessage(token, chatId, "Error al calcular recategorizacion.");
     }
     return;
   }
@@ -1212,5 +1325,60 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const token = env.TELEGRAM_BOT_TOKEN;
+    const chatIds = env.ALLOWED_CHAT_IDS?.split(",").map((id) => id.trim()).filter(Boolean) || [];
+
+    if (chatIds.length === 0) return;
+
+    const today = nowAR();
+    const month = today.getMonth(); // 0-indexed
+    const monthName = today.toLocaleDateString("es-AR", { month: "long" });
+
+    for (const chatId of chatIds) {
+      const id = parseInt(chatId, 10);
+      if (isNaN(id)) continue;
+
+      // Always send IIBB reminder
+      await sendMessage(
+        token,
+        id,
+        `📋 <b>Recordatorio IIBB</b>\n\n` +
+          `Es momento de verificar tu situacion de Ingresos Brutos para ${monthName}.\n` +
+          `Revisa si tenes saldo pendiente en tu agencia provincial.`
+      );
+
+      // Jan (0) and Jul (6): recategorización alert
+      if (month === 0 || month === 6) {
+        try {
+          const afipEnv = getAfipEnv(env);
+          const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+          const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
+          const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, ptoVta, afipEnv);
+          const current = findCategory(annual.total);
+
+          let msg = `🔄 <b>Periodo de recategorizacion</b>\n\n`;
+          msg += `Facturado ultimos 12 meses: ${formatCurrency(annual.total)}\n`;
+
+          if (current) {
+            const pct = Math.round((annual.total / current.maxAnnualIncome) * 100);
+            msg += `Categoria actual: <b>${current.name}</b> (${pct}% del tope)\n\n`;
+            if (pct >= 90) {
+              msg += `⚠️ Estas muy cerca del tope. Verifica si necesitas recategorizarte.`;
+            } else {
+              msg += `Verifica tu categoria en ARCA.`;
+            }
+          } else {
+            msg += `\n🚨 Superaste el tope maximo de Monotributo. Consulta con tu contador.`;
+          }
+
+          await sendMessage(token, id, msg);
+        } catch (error) {
+          console.error("Scheduled recat check failed:", error);
+        }
+      }
+    }
   },
 };
