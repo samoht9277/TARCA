@@ -295,8 +295,10 @@ interface AnnualTotal {
 }
 
 /**
- * Sum invoices across ALL puntos de venta for the last 12 months.
- * Discovers all active PtoVta via FEParamGetPtosVenta.
+ * Sum invoices across all PtoVtas in AFIP_PTO_VTA for the last 12 months.
+ * PtoVtas not authorized for WSFEv1 (e.g., web-UI / "Comprobantes en linea")
+ * are skipped silently — WSFEv1 has no visibility into invoices issued through
+ * other ARCA subsystems.
  */
 async function getLast12MonthsTotal(
   auth: import("./afip/wsaa").AuthCredentials,
@@ -313,10 +315,22 @@ async function getLast12MonthsTotal(
 
   let total = 0;
   let count = 0;
+  let activePtos = 0;
 
   for (const ptoVta of ptoVtaNros) {
+    let lastNro = 0;
+    let lastNC = 0;
+    try {
+      lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, 11, afipEnv);
+      lastNC = await getLastInvoiceNumber(auth, cuit, ptoVta, 13, afipEnv);
+    } catch {
+      // PtoVta not authorized for WSFEv1 (web-UI-only) — invisible to this API.
+      continue;
+    }
+    if (lastNro === 0 && lastNC === 0) continue;
+    activePtos++;
+
     // Facturas C (tipo 11)
-    const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, 11, afipEnv);
     let queried = 0;
     for (let i = lastNro; i >= 1 && queried < MAX_RESUMEN_INVOICES; i--) {
       queried++;
@@ -330,7 +344,6 @@ async function getLast12MonthsTotal(
     }
 
     // Notas de Credito C (tipo 13) — subtract
-    const lastNC = await getLastInvoiceNumber(auth, cuit, ptoVta, 13, afipEnv);
     let ncQueried = 0;
     for (let i = lastNC; i >= 1 && ncQueried < MAX_RESUMEN_INVOICES; i--) {
       ncQueried++;
@@ -346,7 +359,7 @@ async function getLast12MonthsTotal(
   const fromLabel = formatDateAR(twelveMonthsAgo);
   const toLabel = formatDateAR(today);
 
-  return { total: Math.max(0, total), count, puntosQueried: ptoVtaNros.length, fromLabel, toLabel };
+  return { total: Math.max(0, total), count, puntosQueried: activePtos, fromLabel, toLabel };
 }
 
 async function handleMessage(
