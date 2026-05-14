@@ -147,6 +147,18 @@ function getAfipEnv(env: Env): "testing" | "production" {
   return env.AFIP_ENV?.trim() === "production" ? "production" : "testing";
 }
 
+/** Primary PtoVta (used for creating invoices). */
+function primaryPtoVta(env: Env): number {
+  return parseInt(env.AFIP_PTO_VTA.split(",")[0].trim(), 10);
+}
+
+/** All PtoVta numbers (used for scanning in /recat). Supports comma-separated. */
+function allPtoVtas(env: Env): number[] {
+  return env.AFIP_PTO_VTA.split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !isNaN(n) && n > 0);
+}
+
 function nowAR(): Date {
   const utc = Date.now();
   return new Date(utc + AR_TZ_OFFSET);
@@ -290,23 +302,14 @@ async function getLast12MonthsTotal(
   auth: import("./afip/wsaa").AuthCredentials,
   cuit: string,
   afipEnv: "testing" | "production",
-  configuredPtoVta: number
+  ptoVtas: number[]
 ): Promise<AnnualTotal> {
   const today = nowAR();
   const twelveMonthsAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
   const cutoff = formatDateYMD(twelveMonthsAgo);
 
-  // Discover all puntos de venta; always include the configured one as fallback
-  let ptoVtaNros: number[];
-  try {
-    const discovered = await getPuntosDeVenta(auth, cuit, afipEnv);
-    ptoVtaNros = discovered.map((p) => p.nro);
-    if (!ptoVtaNros.includes(configuredPtoVta)) {
-      ptoVtaNros.push(configuredPtoVta);
-    }
-  } catch {
-    ptoVtaNros = [configuredPtoVta];
-  }
+  // Deduplicate
+  const ptoVtaNros = [...new Set(ptoVtas)];
 
   let total = 0;
   let count = 0;
@@ -386,7 +389,7 @@ async function handleMessage(
   if (text.startsWith("/check")) {
     try {
       const afipEnv = getAfipEnv(env);
-      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const ptoVta = primaryPtoVta(env);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
       const parts = text.split(/\s+/);
@@ -441,7 +444,7 @@ async function handleMessage(
   if (text.startsWith("/status")) {
     try {
       const afipEnv = getAfipEnv(env);
-      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const ptoVta = primaryPtoVta(env);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
       const lastFactura = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 11, afipEnv);
       const lastNC = await getLastInvoiceNumber(auth, env.AFIP_CUIT, ptoVta, 13, afipEnv);
@@ -471,7 +474,7 @@ async function handleMessage(
       const afipEnv = getAfipEnv(env);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
-      const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv, parseInt(env.AFIP_PTO_VTA, 10));
+      const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv, allPtoVtas(env));
 
       const current = findCategory(annual.total);
       const next = current ? nextCategory(current) : null;
@@ -533,7 +536,7 @@ async function handleMessage(
 
     try {
       const afipEnv = getAfipEnv(env);
-      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const ptoVta = primaryPtoVta(env);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
       // Check invoice exists
@@ -584,7 +587,7 @@ async function handleMessage(
   if (text.startsWith("/resumen")) {
     try {
       const afipEnv = getAfipEnv(env);
-      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const ptoVta = primaryPtoVta(env);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
       const today = nowAR();
@@ -1108,7 +1111,7 @@ async function handleCallbackQuery(
       const result = await createInvoice(
         auth,
         env.AFIP_CUIT,
-        parseInt(env.AFIP_PTO_VTA, 10),
+        primaryPtoVta(env),
         amount,
         afipEnv,
         date,
@@ -1162,7 +1165,7 @@ async function handleCallbackQuery(
 
     try {
       const afipEnv = getAfipEnv(env);
-      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
+      const ptoVta = primaryPtoVta(env);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
       const original = await queryInvoice(auth, env.AFIP_CUIT, ptoVta, cbteNro, afipEnv);
@@ -1254,7 +1257,7 @@ async function handleCallbackQuery(
       const result = await createInvoice(
         auth,
         env.AFIP_CUIT,
-        parseInt(env.AFIP_PTO_VTA, 10),
+        primaryPtoVta(env),
         amount,
         afipEnv,
         date,
@@ -1372,7 +1375,7 @@ export default {
         try {
           const afipEnv = getAfipEnv(env);
           const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
-          const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv, parseInt(env.AFIP_PTO_VTA, 10));
+          const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv, allPtoVtas(env));
           const current = findCategory(annual.total);
 
           let msg = `🔄 <b>Periodo de recategorizacion</b>\n\n`;
