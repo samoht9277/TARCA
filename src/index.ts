@@ -31,9 +31,9 @@ export interface Env {
   SETUP_SECRET: string;
   CALLBACK_SECRET: string;
   // Optional offset for invoices invisible to WSFEv1 (e.g. web-UI / "Comprobantes en linea").
-  // Added to /recat total until AFIP_OFFSET_UNTIL (YYYY-MM-DD) is past.
-  AFIP_OFFSET_TOTAL?: string;
-  AFIP_OFFSET_UNTIL?: string;
+  // Format: comma-separated "YYYYMMDD:amount" pairs. Entries outside the rolling 12-month
+  // window are ignored, so the offset auto-decays as invoices age out.
+  AFIP_OFFSET_INVOICES?: string;
 }
 
 const MAX_AMOUNT = 10_000_000;
@@ -163,21 +163,32 @@ function allPtoVtas(env: Env): number[] {
     .filter((n) => !isNaN(n) && n > 0);
 }
 
-/** Read the manual offset (for invoices invisible to WSFEv1). Returns 0 if unset, malformed, or expired. */
-function getOffset(env: Env, today: Date): { amount: number; untilLabel: string | null } {
-  const amount = parseFloat(env.AFIP_OFFSET_TOTAL ?? "");
-  if (!isFinite(amount) || amount <= 0) return { amount: 0, untilLabel: null };
+/**
+ * Sum manual offset invoices (for comprobantes invisible to WSFEv1, e.g. web-UI / "Comprobantes
+ * en linea") that fall inside the rolling 12-month window. Each entry has its own date, so the
+ * total auto-decays as old invoices age out without any manual maintenance.
+ *
+ * Format: "YYYYMMDD:amount,YYYYMMDD:amount,..." (whitespace and malformed entries ignored).
+ */
+function getOffset(env: Env, today: Date): { amount: number; count: number } {
+  const raw = env.AFIP_OFFSET_INVOICES?.trim();
+  if (!raw) return { amount: 0, count: 0 };
 
-  const untilStr = env.AFIP_OFFSET_UNTIL?.trim() ?? "";
-  const m = untilStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return { amount: 0, untilLabel: null };
+  const twelveMonthsAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
+  const cutoff = formatDateYMD(twelveMonthsAgo);
 
-  const untilDate = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
-  if (isNaN(untilDate.getTime())) return { amount: 0, untilLabel: null };
-
-  if (formatDateYMD(today) > formatDateYMD(untilDate)) return { amount: 0, untilLabel: null };
-
-  return { amount, untilLabel: formatDateAR(untilDate) };
+  let amount = 0;
+  let count = 0;
+  for (const entry of raw.split(",")) {
+    const m = entry.trim().match(/^(\d{8}):(\d+(?:\.\d+)?)$/);
+    if (!m) continue;
+    if (m[1] < cutoff) continue;
+    const v = parseFloat(m[2]);
+    if (!isFinite(v) || v <= 0) continue;
+    amount += v;
+    count++;
+  }
+  return { amount, count };
 }
 
 function nowAR(): Date {
@@ -519,7 +530,7 @@ async function handleMessage(
       msg += `<pre>`;
       if (offset.amount > 0) {
         msg += `Facturado WS    ${formatCurrency(annual.total)}\n`;
-        msg += `Manual hist.    ${formatCurrency(offset.amount)}\n`;
+        msg += `Manual hist.    ${formatCurrency(offset.amount)} (${offset.count} inv)\n`;
         msg += `Total (12m)     ${formatCurrency(grandTotal)}\n`;
       } else {
         msg += `Facturado (12m) ${formatCurrency(grandTotal)}\n`;
@@ -544,10 +555,6 @@ async function handleMessage(
       }
 
       msg += `</pre>`;
-
-      if (offset.amount > 0 && offset.untilLabel) {
-        msg += `\n<i>Offset manual vigente hasta ${offset.untilLabel}</i>`;
-      }
 
       if (current) {
         const pct = (grandTotal / current.maxAnnualIncome) * 100;

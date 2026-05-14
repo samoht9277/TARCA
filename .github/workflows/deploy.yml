@@ -37,7 +37,7 @@ jobs:
           printf '%s' "${{ secrets.CALLBACK_SECRET }}" | npx wrangler secret put CALLBACK_SECRET
 
       - name: Deploy
-        run: npx wrangler deploy --var AFIP_ENV:${{ vars.AFIP_ENV || 'testing' }} --var AFIP_OFFSET_TOTAL:${{ vars.AFIP_OFFSET_TOTAL || '0' }} --var AFIP_OFFSET_UNTIL:${{ vars.AFIP_OFFSET_UNTIL || '' }}
+        run: npx wrangler deploy --var AFIP_ENV:${{ vars.AFIP_ENV || 'testing' }} --var AFIP_OFFSET_INVOICES:${{ vars.AFIP_OFFSET_INVOICES || '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
