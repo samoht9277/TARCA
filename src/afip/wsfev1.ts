@@ -80,6 +80,50 @@ function extractXml(xml: string, tag: string): string | null {
   return match ? match[1].trim() : null;
 }
 
+function extractAllXml(xml: string, tag: string): string[] {
+  const regex = new RegExp(`<(?:[a-zA-Z0-9]+:)?${tag}[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9]+:)?${tag}>`, "g");
+  const results: string[] = [];
+  let match;
+  while ((match = regex.exec(xml)) !== null) {
+    results.push(match[1].trim());
+  }
+  return results;
+}
+
+export interface PuntoDeVenta {
+  nro: number;
+  bloqueado: boolean;
+  fchBaja: string;
+}
+
+/**
+ * Get all puntos de venta for the authenticated CUIT.
+ * Returns only active (not deleted) ones.
+ */
+export async function getPuntosDeVenta(
+  auth: AuthCredentials,
+  cuit: string,
+  env: "testing" | "production"
+): Promise<PuntoDeVenta[]> {
+  const body = authXml(auth, cuit);
+  const response = await soapCall(WSFEV1_URLS[env], "FEParamGetPtosVenta", body);
+
+  const resultBlocks = extractAllXml(response, "PtoVenta");
+  const puntos: PuntoDeVenta[] = [];
+
+  for (const block of resultBlocks) {
+    const nro = parseInt(extractXml(block, "Nro") || "0", 10);
+    const bloqueado = extractXml(block, "Bloqueado") === "S";
+    const fchBaja = extractXml(block, "FchBaja") || "";
+
+    if (nro > 0 && !fchBaja) {
+      puntos.push({ nro, bloqueado, fchBaja });
+    }
+  }
+
+  return puntos;
+}
+
 export async function getLastInvoiceNumber(
   auth: AuthCredentials,
   cuit: string,
