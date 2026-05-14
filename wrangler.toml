@@ -16,3 +16,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 AFIP_ENV = "testing"
+
+# Cron: 5th of every month at 13:00 UTC (10:00 AR time)
+[triggers]
+crons = ["0 13 5 * *"]
