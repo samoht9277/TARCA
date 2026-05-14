@@ -16,7 +16,7 @@ import {
   setWebhook,
 } from "./telegram";
 import { authenticate } from "./afip/wsaa";
-import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, type Concepto, type ReceiverDoc } from "./afip/wsfev1";
+import { createInvoice, createCreditNote, queryInvoice, getLastInvoiceNumber, getPuntosDeVenta, type Concepto, type ReceiverDoc } from "./afip/wsfev1";
 import { CATEGORIES, CATEGORIES_EFFECTIVE_DATE, findCategory, nextCategory } from "./monotributo";
 
 export interface Env {
@@ -277,56 +277,62 @@ export function formatDateAR(date: Date): string {
 interface AnnualTotal {
   total: number;
   count: number;
+  puntosQueried: number;
   fromLabel: string;
   toLabel: string;
 }
 
+/**
+ * Sum invoices across ALL puntos de venta for the last 12 months.
+ * Discovers all active PtoVta via FEParamGetPtosVenta.
+ */
 async function getLast12MonthsTotal(
   auth: import("./afip/wsaa").AuthCredentials,
   cuit: string,
-  ptoVta: number,
   afipEnv: "testing" | "production"
 ): Promise<AnnualTotal> {
   const today = nowAR();
   const twelveMonthsAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
   const cutoff = formatDateYMD(twelveMonthsAgo);
 
-  const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, 11, afipEnv);
+  const puntos = await getPuntosDeVenta(auth, cuit, afipEnv);
 
   let total = 0;
   let count = 0;
-  let queried = 0;
 
-  for (let i = lastNro; i >= 1 && queried < MAX_RESUMEN_INVOICES; i--) {
-    queried++;
-    const info = await queryInvoice(auth, cuit, ptoVta, i, afipEnv);
-    if (!info.cbteFch) continue;
-
-    if (info.cbteFch < cutoff) break;
-
-    if (info.resultado === "A") {
-      total += parseFloat(info.impTotal);
-      count++;
+  for (const pto of puntos) {
+    // Facturas C (tipo 11)
+    const lastNro = await getLastInvoiceNumber(auth, cuit, pto.nro, 11, afipEnv);
+    let queried = 0;
+    for (let i = lastNro; i >= 1 && queried < MAX_RESUMEN_INVOICES; i--) {
+      queried++;
+      const info = await queryInvoice(auth, cuit, pto.nro, i, afipEnv);
+      if (!info.cbteFch) continue;
+      if (info.cbteFch < cutoff) break;
+      if (info.resultado === "A") {
+        total += parseFloat(info.impTotal);
+        count++;
+      }
     }
-  }
 
-  // Subtract credit notes
-  const lastNC = await getLastInvoiceNumber(auth, cuit, ptoVta, 13, afipEnv);
-  let ncQueried = 0;
-  for (let i = lastNC; i >= 1 && ncQueried < MAX_RESUMEN_INVOICES; i--) {
-    ncQueried++;
-    const info = await queryInvoice(auth, cuit, ptoVta, i, afipEnv, 13);
-    if (!info.cbteFch) continue;
-    if (info.cbteFch < cutoff) break;
-    if (info.resultado === "A") {
-      total -= parseFloat(info.impTotal);
+    // Notas de Credito C (tipo 13) — subtract
+    const lastNC = await getLastInvoiceNumber(auth, cuit, pto.nro, 13, afipEnv);
+    let ncQueried = 0;
+    for (let i = lastNC; i >= 1 && ncQueried < MAX_RESUMEN_INVOICES; i--) {
+      ncQueried++;
+      const info = await queryInvoice(auth, cuit, pto.nro, i, afipEnv, 13);
+      if (!info.cbteFch) continue;
+      if (info.cbteFch < cutoff) break;
+      if (info.resultado === "A") {
+        total -= parseFloat(info.impTotal);
+      }
     }
   }
 
   const fromLabel = formatDateAR(twelveMonthsAgo);
   const toLabel = formatDateAR(today);
 
-  return { total: Math.max(0, total), count, fromLabel, toLabel };
+  return { total: Math.max(0, total), count, puntosQueried: puntos.length, fromLabel, toLabel };
 }
 
 async function handleMessage(
@@ -452,10 +458,9 @@ async function handleMessage(
   if (text.startsWith("/recat")) {
     try {
       const afipEnv = getAfipEnv(env);
-      const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
-      const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, ptoVta, afipEnv);
+      const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv);
 
       const current = findCategory(annual.total);
       const next = current ? nextCategory(current) : null;
@@ -464,6 +469,7 @@ async function handleMessage(
       msg += `<pre>`;
       msg += `Facturado (12m) ${formatCurrency(annual.total)}\n`;
       msg += `Facturas        ${annual.count}\n`;
+      msg += `Ptos de venta   ${annual.puntosQueried}\n`;
       msg += `Periodo         ${annual.fromLabel} - ${annual.toLabel}\n`;
 
       if (current) {
@@ -1354,9 +1360,8 @@ export default {
       if (month === 0 || month === 6) {
         try {
           const afipEnv = getAfipEnv(env);
-          const ptoVta = parseInt(env.AFIP_PTO_VTA, 10);
           const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
-          const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, ptoVta, afipEnv);
+          const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv);
           const current = findCategory(annual.total);
 
           let msg = `🔄 <b>Periodo de recategorizacion</b>\n\n`;
