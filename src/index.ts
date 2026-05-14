@@ -30,6 +30,10 @@ export interface Env {
   AFIP_ENV: string;
   SETUP_SECRET: string;
   CALLBACK_SECRET: string;
+  // Optional offset for invoices invisible to WSFEv1 (e.g. web-UI / "Comprobantes en linea").
+  // Format: comma-separated "YYYYMMDD:amount" pairs. Entries outside the rolling 12-month
+  // window are ignored, so the offset auto-decays as invoices age out.
+  AFIP_OFFSET_INVOICES?: string;
 }
 
 const MAX_AMOUNT = 10_000_000;
@@ -157,6 +161,34 @@ function allPtoVtas(env: Env): number[] {
   return env.AFIP_PTO_VTA.split(",")
     .map((s) => parseInt(s.trim(), 10))
     .filter((n) => !isNaN(n) && n > 0);
+}
+
+/**
+ * Sum manual offset invoices (for comprobantes invisible to WSFEv1, e.g. web-UI / "Comprobantes
+ * en linea") that fall inside the rolling 12-month window. Each entry has its own date, so the
+ * total auto-decays as old invoices age out without any manual maintenance.
+ *
+ * Format: "YYYYMMDD:amount,YYYYMMDD:amount,..." (whitespace and malformed entries ignored).
+ */
+function getOffset(env: Env, today: Date): { amount: number; count: number } {
+  const raw = env.AFIP_OFFSET_INVOICES?.trim();
+  if (!raw) return { amount: 0, count: 0 };
+
+  const twelveMonthsAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
+  const cutoff = formatDateYMD(twelveMonthsAgo);
+
+  let amount = 0;
+  let count = 0;
+  for (const entry of raw.split(",")) {
+    const m = entry.trim().match(/^(\d{8}):(\d+(?:\.\d+)?)$/);
+    if (!m) continue;
+    if (m[1] < cutoff) continue;
+    const v = parseFloat(m[2]);
+    if (!isFinite(v) || v <= 0) continue;
+    amount += v;
+    count++;
+  }
+  return { amount, count };
 }
 
 function nowAR(): Date {
@@ -295,8 +327,10 @@ interface AnnualTotal {
 }
 
 /**
- * Sum invoices across ALL puntos de venta for the last 12 months.
- * Discovers all active PtoVta via FEParamGetPtosVenta.
+ * Sum invoices across all PtoVtas in AFIP_PTO_VTA for the last 12 months.
+ * PtoVtas not authorized for WSFEv1 (e.g., web-UI / "Comprobantes en linea")
+ * are skipped silently — WSFEv1 has no visibility into invoices issued through
+ * other ARCA subsystems.
  */
 async function getLast12MonthsTotal(
   auth: import("./afip/wsaa").AuthCredentials,
@@ -313,10 +347,22 @@ async function getLast12MonthsTotal(
 
   let total = 0;
   let count = 0;
+  let activePtos = 0;
 
   for (const ptoVta of ptoVtaNros) {
+    let lastNro = 0;
+    let lastNC = 0;
+    try {
+      lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, 11, afipEnv);
+      lastNC = await getLastInvoiceNumber(auth, cuit, ptoVta, 13, afipEnv);
+    } catch {
+      // PtoVta not authorized for WSFEv1 (web-UI-only) — invisible to this API.
+      continue;
+    }
+    if (lastNro === 0 && lastNC === 0) continue;
+    activePtos++;
+
     // Facturas C (tipo 11)
-    const lastNro = await getLastInvoiceNumber(auth, cuit, ptoVta, 11, afipEnv);
     let queried = 0;
     for (let i = lastNro; i >= 1 && queried < MAX_RESUMEN_INVOICES; i--) {
       queried++;
@@ -330,7 +376,6 @@ async function getLast12MonthsTotal(
     }
 
     // Notas de Credito C (tipo 13) — subtract
-    const lastNC = await getLastInvoiceNumber(auth, cuit, ptoVta, 13, afipEnv);
     let ncQueried = 0;
     for (let i = lastNC; i >= 1 && ncQueried < MAX_RESUMEN_INVOICES; i--) {
       ncQueried++;
@@ -346,7 +391,7 @@ async function getLast12MonthsTotal(
   const fromLabel = formatDateAR(twelveMonthsAgo);
   const toLabel = formatDateAR(today);
 
-  return { total: Math.max(0, total), count, puntosQueried: ptoVtaNros.length, fromLabel, toLabel };
+  return { total: Math.max(0, total), count, puntosQueried: activePtos, fromLabel, toLabel };
 }
 
 async function handleMessage(
@@ -475,25 +520,33 @@ async function handleMessage(
       const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
 
       const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv, allPtoVtas(env));
+      const offset = getOffset(env, nowAR());
+      const grandTotal = annual.total + offset.amount;
 
-      const current = findCategory(annual.total);
+      const current = findCategory(grandTotal);
       const next = current ? nextCategory(current) : null;
 
       let msg = `<b>Recategorizacion Monotributo</b>\n\n`;
       msg += `<pre>`;
-      msg += `Facturado (12m) ${formatCurrency(annual.total)}\n`;
-      msg += `Facturas        ${annual.count}\n`;
+      if (offset.amount > 0) {
+        msg += `Facturado WS    ${formatCurrency(annual.total)}\n`;
+        msg += `Manual hist.    ${formatCurrency(offset.amount)} (${offset.count} inv)\n`;
+        msg += `Total (12m)     ${formatCurrency(grandTotal)}\n`;
+      } else {
+        msg += `Facturado (12m) ${formatCurrency(grandTotal)}\n`;
+      }
+      msg += `Facturas WS     ${annual.count}\n`;
       msg += `Ptos de venta   ${annual.puntosQueried}\n`;
       msg += `Periodo         ${annual.fromLabel} - ${annual.toLabel}\n`;
 
       if (current) {
-        const pct = Math.round((annual.total / current.maxAnnualIncome) * 100);
+        const pct = Math.round((grandTotal / current.maxAnnualIncome) * 100);
         msg += `\nCategoria       ${current.name}\n`;
         msg += `Tope            ${formatCurrency(current.maxAnnualIncome)}\n`;
         msg += `Uso             ${pct}%`;
 
         if (next) {
-          const remaining = current.maxAnnualIncome - annual.total;
+          const remaining = current.maxAnnualIncome - grandTotal;
           msg += `\nMargen          ${formatCurrency(remaining)}`;
         }
       } else {
@@ -504,7 +557,7 @@ async function handleMessage(
       msg += `</pre>`;
 
       if (current) {
-        const pct = (annual.total / current.maxAnnualIncome) * 100;
+        const pct = (grandTotal / current.maxAnnualIncome) * 100;
         if (pct >= 90) {
           msg += `\n⚠️ Estas al ${Math.round(pct)}% del tope. Considera recategorizarte.`;
         } else if (pct >= 75) {
@@ -1376,13 +1429,18 @@ export default {
           const afipEnv = getAfipEnv(env);
           const auth = await authenticate(env.AFIP_CERT, env.AFIP_KEY, afipEnv);
           const annual = await getLast12MonthsTotal(auth, env.AFIP_CUIT, afipEnv, allPtoVtas(env));
-          const current = findCategory(annual.total);
+          const offset = getOffset(env, today);
+          const grandTotal = annual.total + offset.amount;
+          const current = findCategory(grandTotal);
 
           let msg = `🔄 <b>Periodo de recategorizacion</b>\n\n`;
-          msg += `Facturado ultimos 12 meses: ${formatCurrency(annual.total)}\n`;
+          msg += `Facturado ultimos 12 meses: ${formatCurrency(grandTotal)}\n`;
+          if (offset.amount > 0) {
+            msg += `<i>(incluye ${formatCurrency(offset.amount)} de offset manual)</i>\n`;
+          }
 
           if (current) {
-            const pct = Math.round((annual.total / current.maxAnnualIncome) * 100);
+            const pct = Math.round((grandTotal / current.maxAnnualIncome) * 100);
             msg += `Categoria actual: <b>${current.name}</b> (${pct}% del tope)\n\n`;
             if (pct >= 90) {
               msg += `⚠️ Estas muy cerca del tope. Verifica si necesitas recategorizarte.`;
