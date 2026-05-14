@@ -552,17 +552,25 @@ async function handleMessage(
         msg += `\nExcede cat. ${maxCat.name} (${formatCurrency(maxCat.maxAnnualIncome)})`;
       }
 
-      // Next recategorization (ARCA recat windows close ~Jan 20 / Jul 20)
+      // ARCA recat windows close around Jan 20 / Jul 20
       const today = nowAR();
       const year = today.getFullYear();
-      const candidates = [
+      const nextCandidates = [
         new Date(year, 0, 20),
         new Date(year, 6, 20),
         new Date(year + 1, 0, 20),
       ];
-      const nextRecat = candidates.find((d) => d > today) ?? candidates[candidates.length - 1];
+      const prevCandidates = [
+        new Date(year, 6, 20),
+        new Date(year, 0, 20),
+        new Date(year - 1, 6, 20),
+      ];
+      const nextRecat = nextCandidates.find((d) => d > today) ?? nextCandidates[nextCandidates.length - 1];
+      const prevRecat = prevCandidates.find((d) => d <= today) ?? prevCandidates[prevCandidates.length - 1];
       const daysUntil = Math.ceil((nextRecat.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
-      msg += `\n\nProx Recat.     ${formatDateAR(nextRecat)} (en ${daysUntil} dias)`;
+      const daysSince = Math.floor((today.getTime() - prevRecat.getTime()) / (24 * 60 * 60 * 1000));
+      msg += `\n\nPrev. Recat.    ${formatDateAR(prevRecat)} (hace ${daysSince} dias)`;
+      msg += `\nProx Recat.     ${formatDateAR(nextRecat)} (en ${daysUntil} dias)`;
 
       msg += `</pre>`;
 
@@ -570,8 +578,6 @@ async function handleMessage(
         const pct = (grandTotal / current.maxAnnualIncome) * 100;
         if (pct >= 90) {
           msg += `\n⚠️ Estas al ${Math.round(pct)}% del tope. Considera recategorizarte.`;
-        } else if (pct >= 75) {
-          msg += `\nAtento: al ${Math.round(pct)}% del tope.`;
         }
       } else {
         msg += `\n🚨 Superaste el tope maximo de Monotributo.`;
